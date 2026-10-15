@@ -10,7 +10,7 @@ Open an issue first for anything bigger than a fix, so we can agree on the shape
 - **Tailnet only.** Nothing may listen on anything but `127.0.0.1`, or need `tailscale funnel`. No free shell: commands are a fixed list in config.
 - **No secrets or personal data in the repo.** Tokens go in mode-600 files under `~/.config/`, data under `~/.local/share/homelab-admin/`. Example configs use `example.com` and placeholders.
 - **Match the code around you**: short modules, a docstring that says what the card shows and what it needs, comments that say why.
-- **Check before you send:** `python3 -m pyflakes admin` (or `uvx pyflakes admin`), and run the panel with one of the example configs to see your card render.
+- **Check before you send:** `uvx pyflakes admin` (or `python3 -m pyflakes admin`), the tests (`cd admin && python3 -I -m unittest discover -s tests -t .`: they run in a temporary HOME with the network and subprocesses blocked), and run the panel with one of the example configs to see your card render. New logic comes with a test.
 
 ## Wanted: agent adapters
 
@@ -38,7 +38,7 @@ Anything with a browser and a screen can be a room's touchscreen. The Switch por
 
 A port is usually:
 1. a guide in its own folder (`vita/README.md`): flashing, the browser, kiosk mode, keeping it awake;
-2. its controller's button numbers in `PADS` in `KIOSK_JS`, mapped by hand (press each button: an unknown controller shows "button N" on screen and sends nothing);
+2. its controller's button numbers in `PADS` in `KIOSK_JS` (the Joy-Con layout still lacks ←/→, which would switch the ambient faces, and nobody has confirmed rumble on Switchroot's Chromium), mapped by hand (press each button: an unknown controller shows "button N" on screen and sends nothing);
 3. screenshots, and anything the page needs to fit the screen.
 
 ## Wanted: data sources and game content
@@ -47,6 +47,8 @@ The Life RPG (`admin/modules/life.py`) stores events and computes everything els
 
 - **Sleep and activity:** Fitbit, Garmin, Strava, Oura, Withings, Apple Health (no web API; an iOS Shortcut can post to the panel). Sleep goes to the `sleep` table, one row per night. Sessions go to `activity` with a `kind` that matches config `life.activities`.
 - **Activities with amounts** (km, minutes, sets) scoring per unit. This is open.
+- **Sleep import:** HP, sleep debt and nights on time already read the `sleep` table; a Fitbit, Garmin or Oura import fills it.
+- **Agent health for other agents:** the stuck, finished and usage-limit rules in `agenthealth.py` read Claude Code's screen; Codex, Aider and others need their own patterns. Token counts read Claude Code's transcripts only.
 - **Sprite packs:** 4×4 sheets (front, left, right, back × stand, step, step, action; the last cell a celebration) cut with `admin/life/make_sprites.py`. Packs must be yours to share.
 - **Skill trees and perk names** for more sports, in `KNOWN_SKILLS`.
 

@@ -5,7 +5,8 @@ config.json:
   "remote_modules": {"desk.agents": {"title": "Agents", "tab": "agents"}, ...}
 and list "desk.agents" in "modules". The card is the remote's own HTML with its
 data-action / data-sheet / data-post targets (and file/ image URLs) prefixed "desk.",
-so clicks come back here and are forwarded (data-photo and data-page too). Its waiting agents join this panel's pager.
+so clicks come back here and are forwarded (data-photo and data-page too). Its waiting agents join this panel's pager,
+and its kiosk notices (/live "notices") join this panel's, deduplicated by their global id.
 `tailscale serve` on the remote adds the login header for this machine's owner, so the
 remote's allowed_users check still applies; a tagged machine with no owner (the Switch)
 sends the shared hub token instead.
@@ -23,9 +24,21 @@ TIMEOUT = 4
 ACTION_TIMEOUT = 60  # an agent send takes up to 30 s; a slow action on a remote, more
 FRESH = 2.5  # seconds a remote /live result is reused across cards and clients
 
-_live = {}  # remote id -> (fetched_at, cards dict or None, pager list)
+_live = {}  # remote id -> (fetched_at, cards dict or None, pager list, notices list)
 _locks = {}
 _HOOKS = re.compile(r'(data-(?:action|sheet|post|photo|page)="|src="file/)')
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib re-sends X-Hub-Token to wherever a redirect points: refuse every redirect instead."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirects are refused", headers, fp)
+
+
+def _opener():
+    # No proxies from the environment (they would see the hub token) and no redirects, as in coop.py.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
 def _fetch(cfg, rid, path, body=None, timeout=TIMEOUT):
@@ -34,7 +47,7 @@ def _fetch(cfg, rid, path, body=None, timeout=TIMEOUT):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method="GET" if body is None else "POST",
                                  headers={"Content-Type": "application/json", "X-Hub-Token": hub_token()})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _opener().open(req, timeout=timeout) as r:
         return r.headers.get("Content-Type", ""), r.read()
 
 
@@ -55,9 +68,14 @@ def live(cfg, rid):
             # waiting agents, re-addressed so the pager opens them through this panel
             pager = [{**a, "key": f"{rid}.{a['key']}", "sheet": f"{rid}." + a.get("sheet", f"agents/view/{a.get('handle')}")}
                      for a in d.get("pager", [])]
-        except (OSError, ValueError, KeyError, urllib.error.URLError):
-            cards, pager = None, []
-        _live[rid] = (time.monotonic(), cards, pager)
+            # kiosk notices keep their id: it's global ("desk:nudge:<start>"), so the same one read
+            # directly and through another panel shows once
+            notes = [{"id": n["id"], "text": n["text"], "until": float(n["until"])} for n in d.get("notices") or []
+                     if isinstance(n, dict) and isinstance(n.get("id"), str) and isinstance(n.get("text"), str)
+                     and isinstance(n.get("until"), (int, float))]
+        except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
+            cards, pager, notes = None, [], []
+        _live[rid] = (time.monotonic(), cards, pager, notes)
         return cards, pager
 
 
@@ -68,6 +86,21 @@ def pager(cfg):
     used = {m.split(".", 1)[0] for m in shown if "." in m}
     return [a for rid in cfg.get("remotes", {}) if rid in used for a in live(cfg, rid)[1]
             if a["sheet"].split("/", 1)[0] in shown]
+
+
+def notices(cfg):
+    """Kiosk notices from the remotes this panel shows cards of, one per id."""
+    used = {m.split(".", 1)[0] for m in cfg.get("modules", []) if "." in m}
+    out, seen = [], set()
+    for rid in cfg.get("remotes", {}):
+        if rid not in used:
+            continue
+        live(cfg, rid)
+        for n in (_live.get(rid) or (0, None, [], []))[3]:
+            if n["id"] not in seen:
+                seen.add(n["id"])
+                out.append(n)
+    return out
 
 
 def _prefix(rid, html):

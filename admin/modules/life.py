@@ -8,10 +8,19 @@ computed from them on every read (the rules below), so changing a rule rescores 
 - Meals: a photo or a few words. Claude Haiku 5.5 estimates the items and macros in the background;
   Sonnet 5.5 takes over when Haiku is unsure, and for every correction. Corrections are kept and sent
   with later estimates, so it learns your portions. The key is ~/.config/homelab-admin/anthropic-key (600).
-- Sleep: the `sleep` table (one row per night), filled by a data source such as a Fitbit import; the
-  Recovery skill scores it.
-- PAGES["game"] is the full-screen game. The Switch shows it when docked to a TV (config "game").
-- Phone alerts (modules/notify.py) on a level up, and on Friday evening when a weekly quest is behind.
+- Sleep: the `sleep` table (one row per night, keyed by the day you woke up), filled by a data source such
+  as a Fitbit import, or by hand ("Slept…" on the card, ACTIONS["sleep"]). A night typed by hand replaces
+  whatever that day had. The Recovery skill scores it.
+- The desk's bridge (modules/bridge.py) hands its events to record(), which keeps them in the `bridge`
+  table, once each by (src, ref). The Balance skill, bedtime nights and the weekly boss come from them;
+  the rules are in modules/rpg.py and only count from the first day the bridge delivered anything.
+- Bars (HP from sleep, Energy, Stamina), mood, achievements, titles and cosmetics (equipped from the game,
+  ACTIONS["equip"], kept in `meta`): modules/rpg.py.
+- PAGES["game"] is the full-screen game, read from life/game.html on every request. The Switch shows it
+  when docked to a TV (config "game"). Its state (FILES["state"]) adds the desk's party (STATE["party"],
+  when under 2 minutes old) and the co-op board (STATE["coop"], from modules/coop.py, under 30 minutes old).
+- Phone alerts (modules/notify.py) on a level up, a new achievement, and on Friday evening when a weekly
+  quest is behind.
 
 Goals (calorie and macro targets, sessions a week) are set from the card and kept in the database.
 
@@ -19,8 +28,10 @@ config "life" (every key optional):
   "name"          shown in the game, and in the meal prompt ("Ana")
   "food_context"  where the meals are, for ambiguous dishes ("Mexico City: tacos, chilaquiles, pozole…")
   "activities"    {kind: {"label", "emoji", "skill", "xp", "per_week", "quest_bonus"}}
-  "skills"        {skill: {"label", "color", "perks": [5 names]}}; Nutrition and Recovery are built in
-  "sprites"       folder of avatar strips (life/make_sprites.py); without one, a drawn pixel avatar"""
+  "skills"        {skill: {"label", "color", "perks": [5 names]}}; Nutrition, Recovery and Balance are built in
+  "sprites"       folder of avatar strips (life/make_sprites.py); without one, a drawn pixel avatar
+  "sleep_hours"   a night's target, for the sleep debt and HP (8)
+  "coop"          {"board", "party_goal"}: the co-op board's name and the quests the party aims for a week"""
 import base64
 import json
 import os
@@ -32,8 +43,8 @@ import urllib.request
 from contextlib import closing
 from datetime import date, datetime, timedelta
 
-from modules import notify
-from modules.common import ago, bar, e, pill, row
+from modules import night, notify, rpg
+from modules.common import STATE, ago, bar, e, icon, pill, row
 
 NAME, TITLE, TAB = "life", "Life", "home"
 SAMPLE_EVERY = 60
@@ -45,6 +56,7 @@ API = "https://api.anthropic.com/v1/messages"
 FAST, CAREFUL = "claude-haiku-5-5", "claude-sonnet-5-5"
 SURE = 0.6  # a Haiku estimate less confident than this is redone by Sonnet
 UPLOADS = {"meal": 8 << 20}  # a phone photo, already shrunk to 1568 px by the page
+SLEEP_DAYS = 7  # a night typed by hand: at most this many days back
 
 # --- Rules. Nothing below is stored: change a number (or the config) and the whole history is rescored. ---
 DEFAULT_ACTIVITIES = {
@@ -57,7 +69,9 @@ KNOWN_SKILLS = {
     "endurance": {"label": "Endurance", "color": "#f59e0b", "perks": ["First mile", "Steady pace", "Negative split", "Long haul", "Iron lungs"]},
     "nutrition": {"label": "Nutrition", "color": "#4ade80", "perks": ["Food log", "Protein aware", "Macro balance", "Meal prep", "Fuel master"]},
     "recovery": {"label": "Recovery", "color": "#a78bfa", "perks": ["Lights out", "Steady sleeper", "Deep rest", "Recharged", "Iron sleep"]},
+    "balance": {"label": "Balance", "color": "#2dd4bf", "perks": ["Step away", "Stretch break", "Hands off", "Steady rhythm", "Zen master"]},
 }
+BUILT_IN = ("nutrition", "recovery", "balance")
 COLORS = ["#ef6b4a", "#38bdf8", "#f59e0b", "#f472b6", "#2dd4bf", "#facc15"]
 PERK_NAMES = ["Novice", "Adept", "Skilled", "Expert", "Master"]
 XP_MEAL = 5            # nutrition, per meal logged
@@ -68,6 +82,12 @@ PROTEIN_WEEK = ("nutrition", 60, 5)  # skill, bonus and default days a week for 
 PERKS_AT = (2, 4, 6, 8, 10)  # skill levels that unlock each perk
 TITLES = ((1, "Rookie"), (3, "Apprentice"), (5, "Regular"), (8, "Athlete"), (12, "Veteran"), (16, "Champion"), (20, "Legend"))
 MACROS = ("kcal", "protein", "carbs", "fat")
+SLEEP_HOURS = 8        # default nightly target (config "life.sleep_hours")
+COOP = {"board": "Weekly quest board", "party_goal": 12}
+RECORD_KINDS = ("answer", "break", "presence", "sit", "nudge")  # desk events record() keeps
+RECORD_MAX = 2048      # bytes of an event's JSON data
+PARTY_FRESH_S = 120    # STATE["party"] older than this isn't shown
+COOP_FRESH_S = 1800    # nor STATE["coop"] older than this (modules/coop.py rereads friends every 600 s)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS activity(id INTEGER PRIMARY KEY, ts REAL NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL);
@@ -78,8 +98,11 @@ CREATE TABLE IF NOT EXISTS sleep(day TEXT PRIMARY KEY, minutes INTEGER NOT NULL,
   source TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS goal(key TEXT PRIMARY KEY, value REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bridge(src TEXT NOT NULL, ref TEXT NOT NULL, ts REAL NOT NULL, day TEXT NOT NULL,
+  kind TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(src, ref));
 CREATE INDEX IF NOT EXISTS activity_day ON activity(day);
 CREATE INDEX IF NOT EXISTS meal_day ON meal(day);
+CREATE INDEX IF NOT EXISTS bridge_day ON bridge(day);
 """
 _ready = threading.Lock()
 _made = []
@@ -116,10 +139,15 @@ def _db():
     with _ready:
         if not _made:
             os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
+            # Create the file 600 before SQLite touches it: a chmod afterwards leaves a short open window.
+            fd = os.open(DB_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
             with closing(sqlite3.connect(DB_PATH)) as con:
                 con.execute("PRAGMA journal_mode=WAL")
                 con.executescript(SCHEMA_SQL)
-            os.chmod(DB_PATH, 0o600)
             _made.append(True)
     con = sqlite3.connect(DB_PATH, timeout=10)
     con.row_factory = sqlite3.Row
@@ -153,15 +181,53 @@ def _meta(key, value=None):
     _w("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, str(value)))
 
 
+def record(src, ref, kind, ts, data):
+    """Keep one desk event for the game. Called in-process by modules/bridge.py, never over HTTP.
+    src is "desk:<epoch>" and ref the outbox id: an event already kept under (src, ref) is skipped, so
+    pulling the same page twice scores once. Only RECORD_KINDS are kept; data (a dict) is cut to
+    RECORD_MAX bytes of JSON. -> True if it was new and kept."""
+    if kind not in RECORD_KINDS or not isinstance(data, dict) or isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return False
+    src, ref = str(src or ""), str(ref or "")
+    if not src or not ref or len(src) > 100 or len(ref) > 40 or not 0 < ts < 1e11:
+        return False
+    text = json.dumps(data, ensure_ascii=False, default=str)
+    if len(text.encode()) > RECORD_MAX:  # keep the plain values, strings cut short
+        data = {str(k)[:40]: v[:100] if isinstance(v, str) else v for k, v in data.items()
+                if v is None or isinstance(v, (str, int, float, bool))}
+        text = json.dumps(data, ensure_ascii=False)
+        if len(text.encode()) > RECORD_MAX:
+            text = "{}"
+    with closing(_db()) as con, con:
+        cur = con.execute("INSERT INTO bridge(src, ref, ts, day, kind, data) VALUES(?, ?, ?, ?, ?, ?)"
+                          " ON CONFLICT(src, ref) DO NOTHING",
+                          (src, ref, float(ts), date.fromtimestamp(ts).isoformat(), kind, text))
+    if cur.rowcount != 1:
+        return False
+    _ver[0] += 1
+    return True
+
+
+def _bridge_rows():
+    out = []
+    for r in _q("SELECT ts, kind, data FROM bridge ORDER BY ts"):
+        try:
+            data = json.loads(r["data"])
+        except ValueError:
+            data = {}
+        out.append({"ts": r["ts"], "kind": r["kind"], "data": data if isinstance(data, dict) else {}})
+    return out
+
+
 def rules(cfg):
     """The game's shape from config "life": activities, skills (activity skills first, then the built-in
-    Nutrition and Recovery), weekly quests and goals."""
+    Nutrition, Recovery and Balance), weekly quests, goals, the sleep target and the co-op board."""
     c = (cfg or {}).get("life") or {}
     acts = {}
     for kind, a in (c.get("activities") or DEFAULT_ACTIVITIES).items():
         acts[kind] = {"label": kind.replace("_", " ").title(), "emoji": "", "skill": kind, "xp": 50, "per_week": 0,
                       "quest_bonus": 0, **a}
-    keys = list(dict.fromkeys([a["skill"] for a in acts.values()] + ["nutrition", "recovery"]))
+    keys = list(dict.fromkeys([a["skill"] for a in acts.values()] + list(BUILT_IN)))
     skills = []
     for i, k in enumerate(keys):
         spec = {**KNOWN_SKILLS.get(k, {}), **(c.get("skills") or {}).get(k, {})}
@@ -177,7 +243,8 @@ def rules(cfg):
             "default_goals": {**{kind: a["per_week"] for kind, a in acts.items()}, "protein_days": PROTEIN_WEEK[2]},
             "quests": {**{kind: a["label"] for kind, a in acts.items()}, "protein_days": "Protein days"},
             "name": c.get("name") or (cfg or {}).get("name") or "", "food": c.get("food_context") or "",
-            "sprites": os.path.expanduser(c.get("sprites") or SPRITES), "key": json.dumps(c, sort_keys=True)}
+            "sprites": os.path.expanduser(c.get("sprites") or SPRITES), "key": json.dumps(c, sort_keys=True),
+            "sleep_min": round(60 * float(c.get("sleep_hours") or SLEEP_HOURS)), "coop": {**COOP, **(c.get("coop") or {})}}
 
 
 def goals(cfg):
@@ -209,8 +276,8 @@ def _end_of(day):
 
 def game(cfg):
     R = rules(cfg)
-    today = date.today()
-    key = (_ver[0], _stamp(), today, R["key"])
+    today, now = date.today(), time.time()
+    key = (_ver[0], _stamp(), today, R["key"], night.next_wake(cfg, now), json.dumps((cfg or {}).get("night")))
     if _cache.get("key") == key:
         return _cache["game"]
     g = goals(cfg)
@@ -240,7 +307,8 @@ def game(cfg):
             weeks.setdefault(_monday(date.fromisoformat(day)), {}).setdefault("protein_days", []).append(d["hit"])
         if g.get("kcal") and day < today.isoformat() and abs(d["kcal"] - g["kcal"]) <= 0.1 * g["kcal"]:
             events.append((_end_of(day), "nutrition", XP_KCAL_DAY, "Calories on target"))
-    for s in _q("SELECT day, minutes FROM sleep"):
+    sleeps = _q("SELECT day, minutes, source FROM sleep")
+    for s in sleeps:
         xp = sum(x for need, x in XP_SLEEP if s["minutes"] >= need)
         if xp:
             events.append((datetime.fromisoformat(s["day"] + "T07:00").timestamp(), "recovery", xp,
@@ -250,6 +318,16 @@ def game(cfg):
             need = int(g.get(q) or 0)
             if need and xp and len(got.get(q, [])) >= need:
                 events.append((sorted(got[q])[need - 1], skill, xp, f"Quest: {R['quests'][q]} ×{need}"))
+
+    # The desk's bridge (rpg.py): its XP, and the boss reward, only from the first day it delivered data.
+    brows = _bridge_rows()
+    since = datetime.combine(date.fromtimestamp(brows[0]["ts"]), datetime.min.time()).timestamp() if brows else None
+    bridge_xp = rpg.bridge_events(brows, cfg, now)
+    events += bridge_xp
+    needs = {q: int(g.get(q) or 0) for q in R["bonus"] if int(g.get(q) or 0) and (q != "protein_days" or g.get("protein"))}
+    defeats = rpg.boss_events(weeks, needs)
+    if since is not None:
+        events += [ev for ev in defeats if ev[0] >= since]
 
     this = _monday(today)
 
@@ -277,7 +355,7 @@ def game(cfg):
         have, wk = weekly(q)
         label = R["quests"][q]
         quests.append({"key": q, "name": f"{label} ×{need}", "have": have, "need": need, "done": have >= need,
-                       "reward": f"+{xp} {names[skill]}" if xp else ""})
+                       "reward": f"+{xp} {names.get(skill, 'XP')}" if xp else ""})
         if q != "protein_days":
             streaks.append({"name": f"{label} weeks", "short": f"{label} {wk} wk", "n": wk})
     if g.get("protein"):
@@ -301,15 +379,75 @@ def game(cfg):
         "activities": [{"kind": k, "label": a["label"], "emoji": a["emoji"]} for k, a in R["acts"].items()], "streaks": streaks, "week": this.isoformat(),
         "today": {"date": t, **{k: round(days.get(t, {}).get(k, 0)) for k in MACROS},
                   "goals": {k: g.get(k) for k in MACROS}, "meals": meals_today[::-1]},
-        "feed": [{"when": time.strftime("%a %H:%M", time.localtime(ts)), "text": text, "xp": xp, "skill": names[skill]}
+        "feed": [{"when": time.strftime("%a %H:%M", time.localtime(ts)), "text": text, "xp": xp, "skill": names.get(skill, "XP")}
                  for ts, skill, xp, text in sorted(events, key=lambda ev: -ev[0])[:10]],
     }
+    out.update(_rpg(cfg, R, g, out, acts, meals, days, sleeps, brows, bridge_xp, defeats, events, now))
     did = [a["kind"] for a in acts if a["day"] == t]
     out["outfit"] = did[-1] if did and sprite(R, did[-1]) else "casual"
     out["sprite"] = sprite(R, out["outfit"])
     out["avatar"] = None if out["sprite"] else avatar(out)
     _cache.update(key=key, game=out)
     return out
+
+
+def _rpg(cfg, R, g, out, acts, meals, days, sleeps, brows, bridge_xp, defeats, events, now):
+    """The keys rpg.py adds to the game: bars, mood, sleep, boss, achievements, titles, equipped,
+    cosmetics and daily."""
+    today = date.today()
+    first = date.fromtimestamp(brows[0]["ts"]) if brows else None
+    n = rpg.nights(brows, cfg, first, now)
+    judged = sorted(n["on_time"] + n["broken"])[-7:]
+    debt = rpg.sleep_debt(sleeps, R["sleep_min"], today)
+    last = max(sleeps, key=lambda r: r["day"], default=None)
+    b = rpg.bars(debt, R["sleep_min"], out["today"], out["quests"])
+
+    # When each achievement was first earned
+    breaks = [ev[0] for ev in bridge_xp if ev[3] in (rpg.TEXT_BREAK, rpg.TEXT_NUDGE)]
+    hits = sorted(d for d, v in days.items() if v["hit"])
+    run, protein_week = 0, None
+    for i, d in enumerate(hits):
+        run = run + 1 if i and date.fromisoformat(d) - date.fromisoformat(hits[i - 1]) == timedelta(days=1) else 1
+        if run == 7:
+            protein_week = days[d]["hit"]
+            break
+    reached, total = {}, 0
+    for ev in sorted(events, key=lambda ev: ev[0]):
+        total += ev[2]
+        for lvl in (5, 10):
+            if lvl not in reached and level_of(total)[0] >= lvl:
+                reached[lvl] = ev[0]
+    rested = [datetime.fromisoformat(s["day"] + "T07:00").timestamp() for s in sleeps if s["minutes"] >= 480]
+    facts = {
+        "first_session": next((a["ts"] for a in acts if a["kind"] in R["acts"]), None),
+        "food_log": next((m["ts"] for m in meals if m["status"] == "done" and m["kcal"]), None),
+        "well_rested": min(rested, default=None),
+        "protein_week": protein_week,
+        "boss_slayer": min((ev[0] for ev in defeats), default=None),
+        "level_5": reached.get(5), "level_10": reached.get(10),
+        "remote": next((ev[0] for ev in bridge_xp if ev[3] == rpg.TEXT_AWAY), None),
+        "stretch": sorted(breaks)[9] if len(breaks) >= 10 else None,
+        "lights_out": n["seven"],
+    }
+    ach = rpg.achievements(facts)
+    title_list = rpg.titles(out["level"], ach, TITLES)
+    cosmetic_list = rpg.cosmetics(out["level"], ach)
+    equipped = {}
+    for slot in rpg.SLOTS:  # an item no longer unlocked (a goal changed, a session removed) comes off
+        item = _meta(f"equip.{slot}")
+        equipped[slot] = item if item and rpg.unlocked(slot, item, title_list, cosmetic_list) else None
+
+    done = ([("session", a["ts"]) for a in acts if a["kind"] in R["acts"]]
+            + [("meal", m["ts"]) for m in meals if m["status"] == "done" and m["kcal"]]
+            + [("protein", v["hit"]) for v in days.values() if v["hit"]] + [("break", ts) for ts in breaks])
+    return {
+        "bars": b, "mood": rpg.mood(b),
+        "sleep": {"debt_min": debt, "last": dict(last) if last else None,
+                  "nights_on_time": sum(1 for ev in judged if ev in n["on_time"]), "bedtime_streak": n["streak"]},
+        "boss": rpg.boss(_monday(today), out["quests"]),
+        "achievements": ach, "titles": title_list, "equipped": equipped, "cosmetics": cosmetic_list,
+        "daily": rpg.daily_standup(done, today, protein=bool(g.get("protein")), bridge=bool(brows)),
+    }
 
 
 # The avatar: 16-frame strips cut from 4×4 sprite sheets by life/make_sprites.py, one per outfit
@@ -337,25 +475,34 @@ _SPRITE = ["................", ".....HHHHHH.....", "....HHHHHHHH....", "....HSSS
            "..SBBBBBBBBBBS..", "..S.BBBBBBBB.S..", "....BBBBBBBB....", "....PPP..PPP....", "....PPP..PPP....",
            "...KKKK..KKKK..."]
 _PALETTE = {"H": "#3b2a20", "S": "#e0b48a", "E": "#1f2330", "m": "#b45309", "P": "#2b3a67", "K": "#1a1a1a",
-            "W": "#ef4444", "G": "#f59e0b", "C": "#b91c1c", "Y": "#facc15"}
+            "W": "#ef4444", "G": "#f59e0b", "C": "#b91c1c", "Y": "#facc15", "V": "#7c3aed", "L": "#16a34a",
+            "N": "#1e3a8a", "w": "#f8fafc", "R": "#e5e7eb"}
 
 
 def avatar(state):
+    """The drawn avatar. Without anything equipped, gear comes with levels: a headband at 3, a belt at 5, a
+    cape at 10, a crown at 20. An equipped hat, cape or aura (rpg.py) replaces that slot; the mood sets the face."""
     top = max(state["skills"], key=lambda k: k["xp"])
+    worn = state.get("equipped") or {}
+    lvl = state["level"]
+    hats = [worn["hat"]] if worn.get("hat") else [h for at, h in ((3, "headband"), (20, "crown")) if lvl >= at]
+    cape = worn.get("cape") or ("cape" if lvl >= 10 else None)
     grid = [list(r) for r in _SPRITE]
-    if state["level"] >= 10:  # a cape behind the body
+    for y, line in rpg.MOODS.get((state.get("mood") or {}).get("key"), ("", "", {}))[2].items():
+        grid[y] = list(line)
+    if cape in rpg.CAPE_ART:  # a cape behind the body
         for y in range(8, 15):
             for x in (2, 13):
                 if grid[y][x] == ".":
-                    grid[y][x] = "C"
-    if state["level"] >= 3:
-        grid[2] = list("....WWWWWWWW....")
-    if state["level"] >= 5:
+                    grid[y][x] = rpg.CAPE_ART[cape]
+    for hat in hats:
+        for y, line in rpg.HAT_ART.get(hat, {}).items():
+            grid[y] = list(line)
+    if lvl >= 5:
         grid[12] = list("....GGGGGGGG....")
-    if state["level"] >= 20:
-        grid[0] = list(".....Y.YY.Y.....")
     colors = {**_PALETTE, "B": top["color"] if top["xp"] else "#6d4fd8"}
-    rects = []
+    aura = rpg.AURA_ART.get(worn.get("aura"))
+    rects = [f'<circle cx="8" cy="8.5" r="7.5" fill="{aura}" opacity=".3"/>'] if aura else []
     for y, line in enumerate(grid):
         x = 0
         while x < 16:
@@ -467,6 +614,16 @@ def sample(cfg):
                     url=panel + "page/life/game", tag="life level", urgency="normal")
     if seen != str(s["level"]):
         _meta("level", s["level"])
+    got = [a for a in s["achievements"] if a["on"]]
+    told = _meta("achievements")
+    if told is None:  # the first time, what's already earned is only noted
+        _meta("achievements", json.dumps([a["key"] for a in got]))
+    else:
+        new = [a for a in got if a["key"] not in json.loads(told)]
+        if new:
+            _meta("achievements", json.dumps(sorted(set(json.loads(told)) | {a["key"] for a in new})))
+            notify.send(cfg, "🏆 " + " · ".join(a["name"] for a in new), " ".join(a["about"] for a in new),
+                        url=panel + "page/life/game", tag="life achievement", urgency="normal")
     now = datetime.now()
     behind = [q for q in s["quests"] if q["key"] != "protein_days" and not q["done"]]
     if now.weekday() == 4 and now.hour >= 18 and behind and _meta("nudged") != s["week"]:
@@ -483,9 +640,22 @@ def _fmt(v, unit=""):
 
 def card(cfg):
     s = game(cfg)
-    face = f'<img src="{s["sprite"]["url"]}" alt="">' if s["sprite"] else s["avatar"]
+    sp = s["sprite"]  # frame 0 of the strip (the frame's own aspect ratio crops the rest), as the game does
+    face = (f'<span class="frame" style="aspect-ratio:{int(sp["w"])}/{int(sp["h"])}"><img src="{sp["url"]}" alt=""></span>'
+            if sp else s["avatar"])
     out = [f'<div class="life-top"><span class="av">{face}</span><div><b>Level {s["level"]} · {e(s["title"])}</b>'
            f'{bar(s["into"] / s["span"])}<small>{s["into"]}/{s["span"]} XP to level {s["level"] + 1}</small></div></div>']
+    b = s["bars"]
+    out.append(row("Mood", f'{e(s["mood"]["emoji"])} {e(s["mood"]["name"])}'))
+    for k, label in (("hp", "HP"), ("energy", "Energy"), ("stamina", "Stamina")):
+        if b[k] is not None:  # no HP without sleep data
+            out.append(row(label, f"<small>{b[k]}/100</small>"))
+            out.append(bar(b[k] / 100, "bad" if b[k] < 35 else "warn" if b[k] < 60 else "ok"))
+    sl = s["sleep"]
+    if sl["debt_min"] is not None:
+        out.append(row("Sleep debt, 7 days", f'<b>{sl["debt_min"] // 60} h {sl["debt_min"] % 60:02d}</b>'))
+    if sl["bedtime_streak"]:
+        out.append(row("In bed on time", f'🌙 {sl["bedtime_streak"]} nights in a row'))
     for q in s["quests"]:
         out.append(row(q["name"] + " this week", f'<small>{e(q["reward"])}</small> '
                        + pill("ok" if q["done"] else "dim", f'{q["have"]}/{q["need"]}' + (" ✓" if q["done"] else ""))))
@@ -502,8 +672,8 @@ def card(cfg):
             out.append(row(label, f'<b>{_fmt(t[k], unit)}</b>'))
     out.append('<div class="duo">' + "".join(f'<button data-action="life/log/{e(a["kind"])}">{e(a["emoji"])} {e(a["label"])}</button>'
                                              for a in s["activities"])
-               + '<button data-photo="life/meal">📷 Meal photo</button>'
-               '<button class="alt" data-sheet="life/add/meal"><b>✍️ Describe a meal</b></button></div>')
+               + f'<button class="alt" data-photo="life/meal">{icon("camera")}Meal photo</button>'
+               f'<button class="alt" data-sheet="life/add/meal">{icon("pencil")}<b>Describe a meal</b></button></div>')
     for m in t["meals"]:
         dot = {"estimating": "busy", "failed": "bad"}.get(m["status"], "ok")
         sub = ("Estimating…" if m["status"] == "estimating" else "Couldn't estimate. Tap to retry." if m["status"] == "failed"
@@ -512,7 +682,8 @@ def card(cfg):
                    f'<span class="who"><b>{e(m["title"])}</b><small>{e(sub)}</small></span>'
                    f'<span class="when"><small>{m["time"]}</small></span></button>')
     out.append('<div class="foot"><span><button class="mini" data-sheet="life/history/all"><b>History</b></button> '
-               '<button class="mini" data-sheet="life/goals/all"><b>Goals</b></button></span>'
+               '<button class="mini" data-sheet="life/goals/all"><b>Goals</b></button> '
+               '<button class="mini" data-sheet="life/sleep/new"><b>😴 Slept…</b></button></span>'
                '<button class="mini" data-page="life/game">🎮 Game</button></div>')
     return "".join(out)
 
@@ -579,6 +750,17 @@ def _goals_sheet(cfg, arg):
     return ('<p class="muted"><small>Daily targets score Nutrition: a day at 90 % of the protein goal, and a finished day '
             'within 10 % of the calorie goal. Leave one blank to skip it. Changing a goal rescores your whole history.</small></p>'
             f'<form data-post="life/goals">{fields}<button>Save goals</button></form>')
+
+
+def _sleep_sheet(cfg, arg):
+    today = date.today()
+    return ('<p class="muted"><small>One night, by the day you woke up. It replaces what that day had, an import'
+            ' included. Recovery scores 7 and 8 hours; the sleep debt and HP use your last 7 days.</small></p>'
+            '<form data-post="life/sleep" class="field-form">'
+            f'<label class="field">Woke up on<input type="date" name="day" value="{today}" '
+            f'min="{today - timedelta(days=SLEEP_DAYS)}" max="{today}"></label>'
+            '<label class="field">Hours slept<input type="number" inputmode="decimal" min="0.25" max="16" step="0.25" '
+            'name="hours" placeholder="7.5"></label><button>Save the night</button></form>')
 
 
 def _history_sheet(cfg, arg):
@@ -716,6 +898,41 @@ def set_goals(cfg, arg, body):
     return "Goals saved. Your history was rescored."
 
 
+def log_sleep(cfg, arg, body):
+    # An XP source (Recovery, and the sleep bars) that anyone with the hub token or at the Switch can reach:
+    # an accepted risk on a home panel. The 7-day limit keeps it from rewriting old history.
+    today = date.today()
+    day = date.fromisoformat(str(body.get("day") or today.isoformat()))
+    if not today - timedelta(days=SLEEP_DAYS) <= day <= today:
+        raise ValueError(f"Pick a day in the last {SLEEP_DAYS} days.")
+    try:
+        hours = float(body.get("hours"))
+    except (TypeError, ValueError):
+        raise ValueError("Say how many hours you slept.") from None
+    if not 0 < hours <= 16:
+        raise ValueError("Hours slept go from 0 to 16.")
+    minutes = round(hours * 60)
+    # Typed by hand wins: it replaces the night an import (or an earlier entry) put on that day.
+    _w("INSERT INTO sleep(day, minutes, source) VALUES(?, ?, 'manual') ON CONFLICT(day) DO UPDATE SET"
+       " minutes = excluded.minutes, deep = NULL, rem = NULL, score = NULL, source = 'manual'", (day.isoformat(), minutes))
+    return f"Slept {minutes // 60} h {minutes % 60:02d} · night before {day:%a %d %b} saved."
+
+
+def equip(cfg, arg, body):
+    """Wear an unlocked title or cosmetic (slot: title, hat, cape, aura); an empty item takes it off."""
+    if arg not in rpg.SLOTS:
+        raise ValueError("Unknown slot.")
+    item = str(body.get("item") or "").strip()
+    s = game(cfg)
+    if item and not rpg.unlocked(arg, item, s["titles"], s["cosmetics"]):
+        raise ValueError("That isn't unlocked yet.")
+    _meta(f"equip.{arg}", item)
+    if not item:
+        return f"Took off the {arg}."
+    name = next(x["name"] for x in s["titles"] + s["cosmetics"] if x["key"] == item)
+    return f"Title: {name}." if arg == "title" else f"Wearing the {name.lower()}."
+
+
 def sprite_file(cfg, arg):
     R = rules(cfg)
     if arg != "casual" and arg not in R["acts"]:
@@ -729,203 +946,54 @@ def photo_file(cfg, arg):
         return "image/jpeg", f.read(), True  # a meal's photo never changes
 
 
+def _party():
+    """The desk's agents as a party (modules/bridge.py), while fresh: STATE["party"] = {"at", "members"}."""
+    p = STATE.get("party")
+    if not isinstance(p, dict) or not isinstance(p.get("members"), list):
+        return []
+    at = p.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or not 0 <= time.time() - at < PARTY_FRESH_S:
+        return []
+    return [m for m in p["members"] if isinstance(m, dict)][:20]
+
+
+def _coop():
+    """The co-op board modules/coop.py keeps in STATE["coop"], already in its final shape {"at", "board", "goal",
+    "total", "rows": [{"name", "level", "title", "done", "need", "boss_defeated", "me"}]} with your row first.
+    None without friends (coop removes the key), or when the board is older than COOP_FRESH_S."""
+    c = STATE.get("coop")
+    if not isinstance(c, dict) or not isinstance(c.get("rows"), list):
+        return None
+    at = c.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or not 0 <= time.time() - at < COOP_FRESH_S:
+        return None
+    return {"board": c.get("board"), "goal": c.get("goal"), "total": c.get("total"),
+            "rows": [r for r in c["rows"] if isinstance(r, dict)]}
+
+
 def state_file(cfg, arg):
-    return "application/json", json.dumps(game(cfg)).encode()
+    s = game(cfg)
+    return "application/json", json.dumps({**s, "party": _party(), "coop": _coop()}).encode()
+
+
+# The full-screen game: the docked Switch on a TV (Joy-Cons), or any browser. It reads the state
+# through whichever panel serves it (/page/<module>/game, e.g. pi.life on the Switch). Read on every
+# request, so editing the file needs no restart; app.py fills in %%KIOSK_JS%%.
+GAME_HTML = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "life", "game.html")
 
 
 def game_page(cfg, arg):
-    return GAME_PAGE
+    try:
+        with open(GAME_HTML, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ('<!doctype html><html lang="en"><meta charset="utf-8"><title>Life RPG</title>'
+                '<p style="font-family:monospace">The game page is missing (admin/life/game.html).'
+                ' <a href="/">Back to the panel</a></p></html>')
 
 
-ACTIONS = {"log": log, "past": past, "meal": meal, "fix": fix, "retry": retry, "forget": forget, "goals": set_goals}
-SHEETS = {"meal": _meal_sheet, "add": _add_sheet, "goals": _goals_sheet, "history": _history_sheet}
+ACTIONS = {"log": log, "past": past, "meal": meal, "fix": fix, "retry": retry, "forget": forget, "goals": set_goals,
+           "sleep": log_sleep, "equip": equip}
+SHEETS = {"meal": _meal_sheet, "add": _add_sheet, "goals": _goals_sheet, "history": _history_sheet, "sleep": _sleep_sheet}
 FILES = {"photo": photo_file, "state": state_file, "sprite": sprite_file}
 PAGES = {"game": game_page}
-
-# The full-screen game: the docked Switch on a TV (Joy-Cons), or any browser. It reads the state
-# through whichever panel serves it (/page/<module>/game, e.g. pi.life on the Switch).
-GAME_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0d1022"><link rel="apple-touch-icon" href="/icon.png">
-<title>Life RPG</title><style>
-:root{--bg:#0d1022;--panel:#161a33;--panel2:#1d2244;--line:#2c3366;--fg:#eef0ff;--mute:#9aa0c8;--gold:#f5c542;
---mono:ui-monospace,"DejaVu Sans Mono","SF Mono",Menlo,monospace}
-*{box-sizing:border-box}
-html{font-size:clamp(14px,1.05vw,22px)}
-html,body{margin:0;background:var(--bg);color:var(--fg);font:1rem/1.4 var(--mono);overflow-x:hidden}
-body{min-height:100vh;padding:calc(env(safe-area-inset-top) + 1.2rem) 16px calc(env(safe-area-inset-bottom) + 5.5rem);
-background-image:linear-gradient(rgba(44,51,102,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(44,51,102,.35) 1px,transparent 1px);background-size:3rem 3rem}
-a.back{color:var(--mute);text-decoration:none;font-size:.85rem}
-main{display:grid;gap:1.1rem;grid-template-columns:minmax(0,1fr);max-width:1800px;margin:.6rem auto 0}
-@media (min-width:1000px){main{grid-template-columns:minmax(0,.9fr) minmax(0,1.3fr) minmax(0,1.1fr)}}
-section{background:var(--panel);border:2px solid var(--line);border-radius:6px;padding:1.1rem;box-shadow:0 0 0 2px #090b18,6px 6px 0 #090b18;min-width:0}
-h2{font-size:.8rem;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
-h2:not(:first-child){margin-top:1.4rem}
-.hero{text-align:center}
-#avatar{width:min(17rem,70vw);aspect-ratio:166/161;margin:0 auto;background:radial-gradient(ellipse 45% 7% at 50% 94%,rgba(0,0,0,.45),transparent),var(--panel2);
-border:2px solid var(--line);border-radius:6px;position:relative;overflow:hidden}
-#drawn svg{position:absolute;inset:10%;width:80%;height:80%;animation:breathe 2.6s ease-in-out infinite}
-#logs{display:contents}
-#avatar i{position:absolute;inset:5%;background-repeat:no-repeat;background-size:1600% 100%;image-rendering:pixelated;animation:breathe 2.6s ease-in-out infinite}
-@keyframes breathe{50%{transform:translateY(-1.2%) scaleY(1.01)}}
-h1{font-size:1.6rem;margin:.6rem 0 .1rem;letter-spacing:.04em}
-#lvl{font-size:1.15rem;color:var(--gold)}
-.xp{height:1rem;background:#090b18;border:2px solid var(--line);margin:.6rem 0 .3rem;position:relative}
-.xp i{display:block;height:100%;background:linear-gradient(90deg,#f59e0b,var(--gold));transition:width .6s}
-small,.mute{color:var(--mute);font-size:.8rem}
-.streaks{display:grid;gap:.4rem;margin-top:1rem;text-align:left}
-.streak{display:flex;justify-content:space-between;background:var(--panel2);padding:.45rem .7rem;border-radius:4px}
-.skill{margin-bottom:1.1rem}
-.skill header{display:flex;justify-content:space-between;align-items:baseline;font-weight:700}
-.skill .xp{height:.7rem;margin:.35rem 0}
-.tree{display:flex;align-items:flex-start;margin-top:.45rem}
-.node{flex:1;min-width:0;padding:0 .15rem;overflow-wrap:anywhere;display:grid;justify-items:center;gap:.3rem;text-align:center;position:relative;font-size:.7rem;color:var(--mute)}
-.node::before{content:"";position:absolute;top:.65rem;left:-50%;width:100%;height:2px;background:var(--line);z-index:0}
-.node:first-child::before{display:none}
-.node i{width:1.3rem;height:1.3rem;border:2px solid var(--line);background:#090b18;transform:rotate(45deg);z-index:1}
-.node.on{color:var(--fg)}.node.on i{background:var(--c);border-color:var(--c);box-shadow:0 0 .6rem var(--c)}
-.node.on::before{background:var(--c)}
-.quest{display:grid;grid-template-columns:1.6rem 1fr auto;gap:.6rem;align-items:center;background:var(--panel2);padding:.55rem .7rem;border-radius:4px;margin-bottom:.45rem}
-.quest .box{width:1.2rem;height:1.2rem;border:2px solid var(--mute);display:grid;place-items:center;font-size:.8rem}
-.quest.done .box{border-color:#4ade80;color:#4ade80}.quest.done b{text-decoration:line-through;color:var(--mute)}
-.fuel{display:grid;grid-template-columns:5.5rem 1fr 6.5rem;gap:.5rem;align-items:center;margin-bottom:.35rem;font-size:.85rem}
-.fuel .xp{margin:0;height:.7rem}.fuel span:last-child{text-align:right}
-.feed div{display:grid;grid-template-columns:5.5rem 1fr auto;gap:.5rem;padding:.3rem 0;border-top:1px dashed var(--line);font-size:.85rem}
-.feed div:first-child{border-top:0}.feed b{color:var(--gold)}
-footer{position:fixed;left:0;right:0;bottom:0;display:flex;gap:.8rem;align-items:center;justify-content:center;flex-wrap:wrap;
-padding:.8rem 16px calc(env(safe-area-inset-bottom) + .8rem);background:rgba(13,16,34,.92);border-top:2px solid var(--line)}
-footer button{font:700 1rem var(--mono);color:var(--fg);background:var(--panel2);border:2px solid var(--line);border-radius:4px;padding:.7rem 1.2rem;cursor:pointer}
-footer button.sel{border-color:var(--gold);box-shadow:0 0 0 2px var(--gold)}
-footer button.armed{background:var(--gold);color:#1a1300;border-color:var(--gold)}
-#hint{flex-basis:100%;text-align:center}
-#toast{position:fixed;left:50%;top:1.2rem;transform:translateX(-50%);background:var(--gold);color:#1a1300;font-weight:700;padding:.8rem 1.4rem;
-border-radius:4px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:9;max-width:90vw;text-align:center}
-#toast.show{opacity:1}
-#levelup{position:fixed;inset:0;display:grid;place-items:center;background:rgba(9,11,24,.85);font-size:3rem;font-weight:800;color:var(--gold);
-letter-spacing:.1em;opacity:0;pointer-events:none;transition:opacity .4s;text-align:center;z-index:8}
-#levelup.show{opacity:1}
-</style></head><body>
-<a class="back" id="back" href="/">← Control center</a>
-<main>
-  <section class="hero"><div id="avatar"><i></i><span id="drawn"></span></div><h1 id="name"></h1><div id="lvl">Loading…</div>
-    <div class="xp"><i id="xpbar" style="width:0"></i></div><small id="xp"></small>
-    <div class="streaks" id="streaks"></div></section>
-  <section><h2>Skill trees</h2><div id="skills"></div></section>
-  <section><h2>This week's quests</h2><div id="quests"></div><h2>Today's fuel</h2><div id="fuel"></div>
-    <h2>Recent XP</h2><div class="feed" id="feed"></div></section>
-</main>
-<footer><div id="logs"></div>
-  <small id="hint">Tap twice to log</small></footer>
-<div id="toast"></div><div id="levelup"></div>
-<script>
-const $ = s => document.querySelector(s);
-const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
-const MOD = location.pathname.split('/')[2] || 'life';  // "pi.life" when the Switch's panel serves it
-const KIOSK = new URLSearchParams(location.search).get('kiosk');  // "dock" when opened because it was docked
-%%KIOSK_JS%%
-let lastLevel = null;
-function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 3500) }
-const pct = (a, b) => Math.max(0, Math.min(100, b ? a / b * 100 : 0)).toFixed(1) + '%';
-
-function draw(S) {
-  avatar(S); logs(S.activities);
-  $('#name').textContent = S.name || 'Player';
-  $('#lvl').textContent = `Level ${S.level} · ${S.title}`;
-  $('#xpbar').style.width = pct(S.into, S.span);
-  $('#xp').textContent = `${S.into} / ${S.span} XP · ${S.xp} total`;
-  $('#streaks').innerHTML = S.streaks.map(s => `<div class="streak"><span>${esc(s.name)}</span><b>${s.n ? '🔥 ' + s.n : '—'}</b></div>`).join('');
-  $('#skills').innerHTML = S.skills.map(k => `<div class="skill" style="--c:${k.color}">
-    <header><span style="color:${k.color}">${esc(k.name.toUpperCase())}</span><span>Lv ${k.level} <small>${k.into}/${k.span}</small></span></header>
-    <div class="xp"><i style="width:${pct(k.into, k.span)};background:${k.color}"></i></div>
-    <div class="tree">${k.perks.map(p => `<div class="node${p.on ? ' on' : ''}"><i></i>${esc(p.name)}<small>Lv ${p.at}</small></div>`).join('')}</div></div>`).join('');
-  $('#quests').innerHTML = S.quests.map(q => `<div class="quest${q.done ? ' done' : ''}"><span class="box">${q.done ? '✓' : ''}</span>
-    <span><b>${esc(q.name)}</b><br><small>${esc(q.reward)}</small></span><span>${q.have}/${q.need}</span></div>`).join('')
-    || '<small>Set your goals on the control center.</small>';
-  const t = S.today, rows = [['Calories', 'kcal', ''], ['Protein', 'protein', ' g'], ['Carbs', 'carbs', ' g'], ['Fat', 'fat', ' g']];
-  $('#fuel').innerHTML = rows.map(([label, k, u]) => `<div class="fuel"><span>${label}</span><div class="xp"><i style="width:${pct(t[k], t.goals[k])};background:#4ade80"></i></div>
-    <span>${t[k]}${t.goals[k] ? ' / ' + Math.round(t.goals[k]) : ''}${u}</span></div>`).join('')
-    + (t.meals.length ? '' : '<small>No meals logged today.</small>');
-  $('#feed').innerHTML = S.feed.map(f => `<div><small>${esc(f.when)}</small><span>${esc(f.text)}</span><b>+${f.xp} ${esc(f.skill.slice(0, 3).toUpperCase())}</b></div>`).join('')
-    || '<small>Log a session or a meal to start.</small>';
-  if (lastLevel !== null && S.level > lastLevel) { cheer(); const l = $('#levelup'); l.innerHTML = `LEVEL UP<br>${S.level} · ${esc(S.title)}`; l.classList.add('show'); setTimeout(() => l.classList.remove('show'), 4000) }
-  lastLevel = S.level;
-}
-async function load() {
-  try { const r = await fetch('/file/' + MOD + '/state/now', {cache: 'no-store'}); if (!r.ok) throw 0; draw(await r.json()) }
-  catch (e) { $('#lvl').textContent = "Can't reach the panel" }
-}
-load(); setInterval(load, 5000);
-
-// The avatar: one 16-frame strip per outfit (0-3 front: stand, step, step, its move; 15 celebrating).
-// Mostly standing and breathing; now and then it shifts its weight, and every few beats does its move.
-let sprite = null, frame = 0, busyUntil = 0;
-function show(f) { frame = f; const i = $('#avatar i'); i.style.backgroundPosition = (f / 15 * 100) + '% 0' }
-function avatar(S) {
-  if (!S.sprite) {  // no sprite strips: the drawn pixel avatar
-    if (sprite !== S.avatar) { sprite = S.avatar; $('#avatar i').style.backgroundImage = 'none'; $('#drawn').innerHTML = S.avatar }
-    return;
-  }
-  if (sprite === S.sprite.url) return;
-  $('#drawn').innerHTML = '';
-  sprite = S.sprite.url; $('#avatar i').style.backgroundImage = `url("/${S.sprite.url.replace(/^file\/life\//, 'file/' + MOD + '/')}")`; show(0);
-}
-function play(seq, ms) { busyUntil = Date.now() + seq.length * ms; seq.forEach((f, k) => setTimeout(() => show(f), k * ms)) }
-function cheer() { play([15, 15, 15, 15, 15, 0], 500) }
-let beat = 0;
-setInterval(() => {
-  if (Date.now() < busyUntil) return;
-  beat++;
-  if (beat % 4 === 0) play([3, 3, 3, 0], 450);                 // its move: the coffee, the dumbbell, the ball
-  else if (beat % 2 === 0) play([1, 0, 2, 0], 220);            // a small shift of weight
-}, 3500);
-
-// Logging takes two presses (A twice, or two taps) so a stray one never counts.
-let buttons = [], shown = '', sel = 0, armed = null;
-function logs(list) {  // one button per activity in config "life.activities"
-  const key = JSON.stringify(list); if (key === shown) return; shown = key;
-  $('#logs').innerHTML = list.map(a => `<button data-kind="${esc(a.kind)}" data-label="${esc(a.label.toLowerCase())}">${esc(a.emoji)} Log ${esc(a.label.toLowerCase())}</button>`).join('');
-  buttons = [...document.querySelectorAll('#logs button')]; sel = Math.min(sel, Math.max(0, buttons.length - 1));
-  buttons.forEach(b => b.onclick = () => press(b)); mark();
-}
-function mark() { buttons.forEach((b, i) => { b.classList.toggle('sel', KIOSK && i === sel); b.classList.toggle('armed', b === armed) }) }
-async function press(b) {
-  if (armed !== b) { armed = b; clearTimeout(press.t); press.t = setTimeout(() => { armed = null; mark() }, 4000); mark(); return toast((KIOSK ? 'Press A' : 'Tap') + ' again to log ' + b.dataset.label) }
-  armed = null; mark();
-  const r = await fetch('/action/' + MOD + '/log/' + b.dataset.kind, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-  const d = await r.json().catch(() => ({message: 'Request failed'}));
-  toast(d.message); if (r.ok && / logged/.test(d.message)) cheer(); load();
-}
-
-if (KIOSK) {
-  $('#back').hidden = true;
-  $('#hint').textContent = 'Joy-Con: ↑↓ choose · A twice to log · + control center';
-  mark();
-  let prev = {};
-  setInterval(() => {
-    const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(g => g && g.connected), map = gp && padMap(gp);
-    if (!map) return;
-    for (const [name, i] of Object.entries(map)) {
-      const down = !!(gp.buttons[i] && gp.buttons[i].pressed);
-      if (down && !prev[name]) {
-        if (name === 'up' || name === 'down') { sel = (sel + (name === 'down' ? 1 : buttons.length - 1)) % buttons.length; armed = null; mark() }
-        else if (name === 'a' && buttons[sel]) press(buttons[sel]);
-        else if (name === 'b') { armed = null; mark() }
-        else if (name === 'plus') location.href = '/?stay=1';
-      }
-      prev[name] = down;
-    }
-  }, 40);
-  // undocked again: back to the touchscreen panel
-  if (KIOSK === 'dock') setInterval(() => { if (screen.width < DOCK_WIDTH) location.href = '/' }, 2000);
-  // an agent that starts waiting opens on the panel, as it would there (agents already waiting don't)
-  let seen = null;
-  setInterval(async () => {
-    try {
-      const d = await (await fetch('/live', {cache: 'no-store'})).json(), keys = (d.pager || []).map(a => a.key);
-      const fresh = seen && (d.pager || []).find(a => !seen.includes(a.key));
-      seen = keys;
-      if (fresh) location.href = '/?stay=1#' + new URLSearchParams({sheet: fresh.sheet, title: '🔔 ' + fresh.title + ' · ' + fresh.project});
-    } catch (e) {}
-  }, 5000);
-}
-</script></body></html>"""

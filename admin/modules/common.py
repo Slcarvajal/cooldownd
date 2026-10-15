@@ -129,6 +129,24 @@ def bar(frac, lvl="ok"):
     return f'<div class="bar {lvl}"><i style="width:{pct:.0f}%"></i></div>'
 
 
+# Stroke icons for tiles (24×24, drawn with currentColor; the page's .ic class sets the stroke).
+ICONS = {
+    "bulb": "M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z",
+    "power": "M12 3v8M7.5 6.5a7 7 0 1 0 9 0",
+    "siren": "M7 18v-6a5 5 0 0 1 10 0v6M5 18h14v3H5zM12 3v2M4.2 6.2l1.4 1.4M19.8 6.2l-1.4 1.4",
+    "monitor": "M5.5 4h13A2.5 2.5 0 0 1 21 6.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 13.5v-7A2.5 2.5 0 0 1 5.5 4zM8 20h8M12 16v4",
+    "check": "M5 12.5l4.5 4.5L19 7.5",
+    "x": "M6 6l12 12M18 6L6 18",
+    "camera": "M4 8h3l2-3h6l2 3h3v11H4zM12 9.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z",
+    "pencil": "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
+}
+
+
+def icon(name):
+    """An inline stroke icon from ICONS."""
+    return f'<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="{ICONS[name]}"/></svg>'
+
+
 def spark(values, lo, hi, cls="cyan"):
     """Inline SVG sparkline of recent samples."""
     vals = [v for v in values if v is not None]

@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 
-from modules.common import e, pill
+from modules.common import e, icon, pill
 
 NAME, TITLE, TAB = "ha", "Home", "home"
 GROUPS = [("alarm_control_panel", "Alarm"), ("light", "Lights"), ("camera", "Cameras"),
@@ -17,6 +17,7 @@ GROUPS = [("alarm_control_panel", "Alarm"), ("light", "Lights"), ("camera", "Cam
 ALARM_OPS = {"arm_away": "Arm (away)", "arm_home": "Arm (home)", "arm_night": "Arm (night)", "disarm": "Disarm"}
 ALARM_LEVEL = {"disarmed": "dim", "triggered": "bad", "pending": "warn", "arming": "warn"}  # armed_* -> ok
 DOWN = ("unavailable", "unknown")
+TILES = {"light": "bulb", "switch": "power", "siren": "siren"}  # domains shown as tiles, and their icon
 
 
 def _conf(cfg):
@@ -76,6 +77,18 @@ def _entity(s):
     return _row(f"{icon} {name}", f'{btn}{pill(on, "on" if on else "off")}')
 
 
+def _tile(s):
+    """A light, switch or siren as a tile: a tap toggles it. Lavender when on (red for a sounding siren)."""
+    eid, state, dom = s["entity_id"], s["state"], s["entity_id"].split(".")[0]
+    name = e(_name(s))
+    if state in DOWN:
+        return f'<div class="tile">{icon(TILES[dom])}<b>{name}</b><small>offline</small></div>'
+    on = state == "on"
+    tint = (" tint-bad" if dom == "siren" else " tint-on") if on else ""
+    return (f'<button class="tile{tint}" data-action="ha/toggle/{e(eid)}" aria-pressed="{"true" if on else "false"}">'
+            f'{icon(TILES[dom])}<b>{name}</b><small>{"On" if on else "Off"}</small></button>')
+
+
 def card(cfg):
     if not _token(cfg):
         return ('<p class="muted">Home Assistant isn\'t connected yet. In Home Assistant: your profile → '
@@ -89,7 +102,10 @@ def card(cfg):
     for dom, title in GROUPS:
         items = sorted((s for s in states if s["entity_id"].startswith(dom + ".")), key=_name)
         if items:
-            out.append(f"<h3>{title}</h3>" + "".join(_entity(s) for s in items))
+            if dom in TILES:
+                out.append(f'<h3>{title}</h3><div class="tiles">{"".join(_tile(s) for s in items)}</div>')
+            else:
+                out.append(f"<h3>{title}</h3>" + "".join(_entity(s) for s in items))
     return "".join(out) or '<p class="muted">No lights, cameras or alarm in Home Assistant yet.</p>'
 
 

@@ -6,15 +6,18 @@
   ],
   "modules": [
     "life",
+    "coop",
     "ha",
     "power",
     "desk.overview",
     "pi",
     "uptime",
     "desk.agents",
+    "desk.agenthealth",
     "desk.machine",
     "services",
     "notify",
+    "bridge",
     "tailnet",
     "commands"
   ],
@@ -132,6 +135,10 @@
       "title": "Agents",
       "tab": "agents"
     },
+    "desk.agenthealth": {
+      "title": "Agent health",
+      "tab": "agents"
+    },
     "desk.machine": {
       "title": "Workstation hardware",
       "tab": "machine"
@@ -163,6 +170,11 @@
   "life": {
     "name": "Alex",
     "food_context": "Mexico City: tacos, chilaquiles, pozole…",
+    "sleep_hours": 8,
+    "coop": {
+      "board": "Weekly quest board",
+      "party_goal": 12
+    },
     "activities": {
       "gym": {
         "label": "Gym",
@@ -189,5 +201,13 @@
         "quest_bonus": 50
       }
     }
+  },
+  "night": {
+    "bedtime": "23:30",
+    "wake": "06:30"
+  },
+  "bridge": {
+    "remote": "desk",
+    "fresh_s": 600
   }
 }

@@ -10,6 +10,7 @@
     "pi.pi",
     "pi.ha",
     "desk.agents",
+    "desk.agenthealth",
     "power",
     "desk.machine",
     "tailnet"
@@ -18,6 +19,10 @@
     "power": "home"
   },
   "game": "/page/pi.life/game",
+  "night": {
+    "bedtime": "23:30",
+    "wake": "06:30"
+  },
   "machines": [
     {
       "id": "pc",
@@ -63,6 +68,10 @@
     },
     "desk.agents": {
       "title": "Agents",
+      "tab": "agents"
+    },
+    "desk.agenthealth": {
+      "title": "Agent health",
       "tab": "agents"
     },
     "desk.machine": {

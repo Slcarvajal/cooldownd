@@ -6,13 +6,33 @@
   ],
   "modules": [
     "overview",
+    "presence",
     "agents",
+    "agenthealth",
     "power",
     "machine",
     "services",
     "tailnet",
     "commands"
   ],
+  "tabs": {
+    "presence": "home"
+  },
+  "agenthealth": {
+    "stuck_min": 10,
+    "repeat": 3,
+    "finish_after_s": 45,
+    "forgotten_days": 2,
+    "away_idle_s": 120,
+    "tokens": true
+  },
+  "presence": {
+    "sit_min": 50,
+    "break_min": 3,
+    "active_idle_s": 60,
+    "busy_after_min": 20,
+    "busy_min_working": 2
+  },
   "psu_watts": 650,
   "machines": [
     {

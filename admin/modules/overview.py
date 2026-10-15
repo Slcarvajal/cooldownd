@@ -5,8 +5,10 @@ from modules.common import STATE, ago, e, level
 NAME, TITLE, TAB = "overview", "At a glance", "home"
 
 
-def _tile(label, value, lvl="", sub=""):
-    return (f'<div class="tile"><small>{e(label)}</small><b class="{lvl}">{e(value)}</b>'
+def _tile(label, value, lvl="", sub="", tint=None):
+    """A stat tile: grey when calm, tinted (tint-<level>) when it needs a look; warn and bad tint by default."""
+    tint = tint if tint is not None else lvl if lvl in ("warn", "bad") else ""
+    return (f'<div class="tile{f" tint-{tint}" if tint else ""}"><small>{e(label)}</small><b class="{lvl}">{e(value)}</b>'
             f'{f"<small>{e(sub)}</small>" if sub else ""}</div>')
 
 
@@ -20,20 +22,21 @@ def card(cfg):
     w, c = machine.PSU_LOAD_LIMITS
     load = m.get("psu_load", 0)
     tiles = [
-        _tile("Desktop", "awake", "ok", f"up {ago(m['uptime'])}" if m else ""),
+        _tile("Desktop", "awake", "ok", f"up {ago(m['uptime'])}" if m else "", tint="busy"),
         _tile("Power", f"{m.get('wall', 0):.0f} W", "bad" if load >= c else "warn" if load >= w else "ok",
               f"{load * 100:.0f}% of PSU"),
         _tile("CPU", f"{cpu_t:.0f}°" if cpu_t is not None else "n/a", level(cpu_t, *machine.LIMITS["cpu"]),
               f"{m.get('cpu_util', 0):.0f}% busy"),
         _tile("GPU", f"{gpu_t:.0f}°" if gpu_t is not None else "n/a", level(gpu_t, *machine.LIMITS["gpu"]),
               f"{g.get('util', 0):.0f}% · {g.get('power', 0):.0f} W"),
-        _tile("Agents", f"{counts['working']} working", "busy" if counts["working"] else "dim",
-              f"{counts['waiting']} need you · {counts['atpc']} at PC · {counts['idle']} idle"),
+        _tile("Agents", f"{counts['working'] + counts['stuck']} working", "busy" if counts["working"] + counts["stuck"] else "dim",
+              f"{counts['waiting']} need you · {counts['atpc']} at PC · {counts['idle']} idle",
+              tint="need" if counts["waiting"] else "busy" if counts["working"] + counts["stuck"] else ""),
         _tile("Alerts", str(alerts) if alerts else "none", "bad" if alerts else "ok", "since boot"),
     ]
     out = [f'<div class="tiles">{"".join(tiles)}</div>']
     waiting = [x for x in items if x["status"] == "waiting"]
-    working = [x for x in items if x["status"] == "working"]
+    working = [x for x in items if x["status"] in ("working", "stuck")]  # a stuck agent is still on it
     lists = []  # side by side on a landscape screen
     if waiting:
         lists.append(f"<div><h3>Needs you ({len(waiting)})</h3>" + "".join(agents.item_row(x) for x in waiting) + "</div>")

@@ -6,7 +6,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from modules.common import STATE, ago, e, orca, orca_send
+from modules.common import STATE, ago, e, icon, orca, orca_send
 
 NAME, TITLE, TAB = "agents", "Agents", "agents"
 SAMPLE_EVERY = 6
@@ -18,10 +18,14 @@ SPINNER = re.compile(r"^\s*\S\s+[A-Z][a-z]+…\s*\(\d", re.M)
 KEYS = {"esc": ("\x1b", False), "ctrl-c": ("\x03", False), "enter": ("", True),
         "1": ("1", True), "2": ("2", True), "3": ("3", True), "up": ("\x1b[A", False), "down": ("\x1b[B", False),
         "yes": ("Yes, go ahead.", True), "no": ("No, don't do that.", True)}
-STATUS = {"waiting": ("warn", "needs you"), "atpc": ("dim", "at PC"), "working": ("busy", "working"), "idle": ("dim", "idle")}
+STATUS = {"waiting": ("warn", "needs you"), "atpc": ("dim", "at PC"), "working": ("busy", "working"),
+          "stuck": ("bad", "stuck"), "idle": ("dim", "idle")}  # stuck: set by modules/agenthealth.py
 # Questions set aside with "PC work": handle|summary keys. They stop paging until the question changes.
 DEFERRED = os.path.expanduser("~/.local/share/homelab-admin/deferred.json")
-QUICK = [("pc", "💻 PC work"), ("yes", "✅ Go ahead"), ("no", "✋ No"), ("1", "1"), ("2", "2"), ("3", "3")]
+# The pager's answer tiles, in this order (the Joy-Con's B presses the first): key, tint, icon, label, line below
+QUICK = [("pc", "on", "monitor", "PC work", "I'll answer at the desk"), ("yes", "ok", "check", "Go ahead", ""),
+         ("no", "bad", "x", "No", ""), ("1", "", "", "1", ""), ("2", "", "", "2", ""), ("3", "", "", "3", "")]
+OPTION = re.compile(r"^\s*(?:❯\s*)?([1-3])[.)]\s+(\S.*)$")
 
 
 def _deferred():
@@ -93,9 +97,9 @@ def sample(cfg):
     terms = [t for t in listing.get("terminals", []) if t.get("agentIdentity")]
     with ThreadPoolExecutor(max_workers=6) as pool:
         screens = list(pool.map(lambda t: _screen(t["handle"]), terms))
-    now, items = time.time(), []
+    now, items, bodies = time.time(), [], {}
     for t, lines in zip(terms, screens):
-        body = _content(lines)
+        body = bodies[t["handle"]] = _content(lines)
         age = now - (t.get("lastOutputAt") or 0) / 1000
         title = (t.get("title") or "").strip()
         items.append({
@@ -110,14 +114,19 @@ def sample(cfg):
     for a in items:
         if a["status"] == "waiting" and key_of(a) in deferred:
             a["status"] = "atpc"
-    order = {"waiting": 0, "atpc": 1, "working": 2, "idle": 3}
+    from modules import agenthealth
+    try:
+        agenthealth.observe(cfg, items, bodies, now)  # may mark agents stuck or forgotten
+    except Exception as ex:  # health is extra: a bug there must not freeze the statuses send() relies on
+        print(f"agents.sample: agenthealth.observe failed: {type(ex).__name__}: {ex}", flush=True)
+    order = {"waiting": 0, "atpc": 1, "working": 2, "stuck": 2, "idle": 3}
     items.sort(key=lambda a: (a["host"], a["project"], order[a["status"]], a["age"]))
     STATE["agents"] = {"at": now, "items": items}
 
 
 def item_row(a):
     lvl, label = STATUS[a["status"]]
-    return (f'<button class="agent" data-sheet="agents/view/{e(a["handle"])}">'
+    return (f'<button class="agent s-{e(a["status"])}" data-sheet="agents/view/{e(a["handle"])}">'
             f'<i class="dot {lvl}"></i><span class="who"><b>{e(a["title"])}</b>'
             f'<small>{e(a["summary"] or a["agent"])}</small></span>'
             f'<span class="when"><span class="pill {lvl}">{label}</span><small>{ago(a["age"])}</small></span></button>')
@@ -175,19 +184,35 @@ def _reflow(lines):
     return out
 
 
+def options(lines, width=24):
+    """{"1": "Redis", ...}: the text of the numbered choices in the last lines on screen (Claude Code's
+    "❯ 1. Yes" menus, or a plain "1. Redis: ..." list), cut at a colon or dash, and at a word within `width`."""
+    out = {}
+    for line in lines[-15:]:
+        m = OPTION.match(line)
+        if m:
+            text = re.split(r":\s|\s[-–—]\s|\s\(", m.group(2), maxsplit=1)[0].strip()
+            out[m.group(1)] = text if len(text) <= width else text[:width - 1].rsplit(" ", 1)[0].rstrip(" ,;") + "…"
+    return out
+
+
 def view(cfg, handle):
     a = _find(handle)
     body = _reflow(_content(_screen(handle)))[-50:]
     lvl, label = STATUS[a["status"]]
     keys = "".join(f'<button class="key" data-post="agents/send/{e(handle)}" data-key="{k}">{k}</button>'
                    for k in ("esc", "enter", "1", "2", "3", "ctrl-c"))
-    quick = "".join(
-        f'<button class="key" data-post="agents/defer/{e(handle)}" data-key="pc">{label}</button>' if k == "pc" else
-        f'<button class="key" data-post="agents/send/{e(handle)}" data-key="{k}">{label}</button>' for k, label in QUICK)
+    opts, quick = options(body), []
+    for k, tint, ic, text, sub in QUICK:
+        sub = sub or opts.get(k, "")
+        quick.append(f'<button class="key q-{k}{" tint-" + tint if tint else ""}" '
+                     f'data-post="agents/{"defer" if k == "pc" else "send"}/{e(handle)}" data-key="{k}">'
+                     f'{icon(ic) if ic else ""}<b>{e(text)}</b>{"<small>" + e(sub) + "</small>" if sub else ""}</button>')
+    quick = "".join(quick)
     return (f'<div class="sheet-meta"><span class="pill {lvl}">{label}</span> {e(a["agent"])} · {e(a["host"])} · '
             f'{e(a["project"])} <small>{e(a["branch"])}</small></div>'
-            f'<div class="quick">{quick}</div>'
-            f'<pre class="screen">{e(chr(10).join(body))}</pre>'
+            f'<div class="pager"><div class="quick">{quick}</div>'
+            f'<pre class="screen">{e(chr(10).join(body))}</pre></div>'
             f'<form data-post="agents/send/{e(handle)}"><textarea name="text" rows="3" '
             f'placeholder="Reply to {e(a["title"])}…"></textarea><button>Send</button></form>'
             f'<div class="keys">{keys}</div>')
@@ -200,7 +225,7 @@ def send(cfg, handle, body):
     a = _find(handle)
     if not a["writable"]:
         return "That terminal is read-only."
-    if a["status"] == "working" and body.get("key") not in ("esc", "ctrl-c"):  # stopping a busy agent stays possible
+    if a["status"] in ("working", "stuck") and body.get("key") not in ("esc", "ctrl-c"):  # stopping a busy agent stays possible
         return f"{a['title']} is busy right now. Nothing was sent."
     key = body.get("key")
     if key:
@@ -216,6 +241,7 @@ def send(cfg, handle, body):
     if now - _recent.get((handle, what), 0) < 15:
         return f"Already sent to {a['title']} a moment ago. Nothing sent again."
     _recent[(handle, what)] = now
+    from modules import agenthealth  # before sending: nothing after a delivery may turn it into an error
     state, detail = orca_send(handle, text, enter)
     print(f"agents.send {a['host']}/{a['project']}/{a['title']!r}: {what[:200]!r} -> {state} {detail}", flush=True)
     if state == "refused":
@@ -223,6 +249,7 @@ def send(cfg, handle, body):
         raise RuntimeError(f"Not sent: {detail}.")
     if state == "unknown":
         return f"{detail}. It may already be in {a['title']}; check its screen before sending again."
+    agenthealth.answered(cfg, a, what)  # sent or typed: an answer, away when the desk is idle; never raises
     if state == "typed":
         return f"Sent to {a['title']}, but {detail}."
     return f"Sent to {a['title']}." if not key else f"Pressed {key} in {a['title']}."

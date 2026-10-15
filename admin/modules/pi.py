@@ -50,7 +50,9 @@ def sample(cfg):
 
 
 def _tile(label, value, lvl="", sub=""):
-    return (f'<div class="tile"><small>{e(label)}</small><b class="{lvl}">{e(value)}</b>'
+    """A stat tile: grey when calm, tinted when it's warn or bad."""
+    tint = f" tint-{lvl}" if lvl in ("warn", "bad") else ""
+    return (f'<div class="tile{tint}"><small>{e(label)}</small><b class="{lvl}">{e(value)}</b>'
             f'{f"<small>{e(sub)}</small>" if sub else ""}</div>')
 
 
