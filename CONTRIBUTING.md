@@ -1,6 +1,6 @@
 # Contributing to Tailroom
 
-Tailroom started as one person's home lab: a Raspberry Pi, a workstation, a Nintendo Switch on a stand and an iPhone. It works because each of those was wired in by hand. **The way it grows is adapters**: other agent IDEs, other screens, other data. If you have one of those at home, you're who this is for.
+Tailroom is for developers who run AI coding agents all day and want to stay healthy doing it. It started as one person's home lab: a Raspberry Pi, a workstation, a Nintendo Switch on a stand and an iPhone, each wired in by hand. **The way it grows is adapters**: other agent IDEs, other screens, other data. If you have one of those at home, you're who this is for.
 
 Open an issue first for anything bigger than a fix, so we can agree on the shape. Small PRs are easiest to land.
 

@@ -1,21 +1,50 @@
 # Tailroom
 
-**A control room for everything on your tailnet.** One Python panel, standard library only, that runs on a Raspberry Pi, your workstation and a jailbroken Nintendo Switch. The panels show each other's cards, page you when an AI coding agent is waiting, wake and sleep your PCs, run Home Assistant on a touchscreen, and turn your gym sessions and meals into an RPG.
+**Keep your agents moving and your body healthy.** Tailroom is a control room for developers who run AI coding agents all day.
 
-No cloud, no app store, no build step. The phone app is the panel added to your Home Screen, and its alerts are Web Push sent by the panel itself.
+Agents stall the moment they need you, so you stay glued to the desk to answer them, and your sleep, meals and workouts pay for it. Tailroom puts your agents on a touchscreen, your phone and a pair of Joy-Cons, so you can answer one from the kitchen or between sets. It also turns your workouts and meals (and your sleep, once you feed it in) into an RPG, so looking after yourself feels like part of the job.
+
+It's one Python panel, standard library only. It runs on a Raspberry Pi, your workstation and a jailbroken Nintendo Switch, all on your tailnet. There's no cloud, no app store and no build step. The phone app is the panel added to your Home Screen, and its alerts are Web Push sent by the panel itself.
+
+<p align="center"><img src="docs/pager-switch.png" width="720" alt="The agent pager on the Switch's screen: an agent asks which store to use for a rate limiter; PC work, Go ahead, No and 1/2/3 buttons above its terminal"></p>
+
+## Your agents
+
+Every coding agent (Claude Code, Codex…) running in your terminals shows up live, by machine and project: who needs you, who's working, who's idle. When one starts waiting on you:
+
+- **The touchscreen chimes and opens it**, with answer buttons above its terminal: PC work, Go ahead, No, 1/2/3.
+- **The Joy-Cons answer it:** ↑/↓ choose, A presses, B means "I'll handle it at the PC", R jumps to the next waiting agent. The highlight starts on PC work, the safe answer.
+- **Your phone gets a push alert** after a minute, and opens the same screen, where you can also type a reply.
+- **"PC work" sets a question aside** without answering it, and it stops paging until the question changes.
+
+The pager never retries text that may already have arrived, and never types into an agent that's busy.
+
+<p align="center">
+  <img src="docs/agents-phone.png" width="300" alt="The Agents tab on a phone: agents grouped by machine and project, with needs you, working, at PC and idle states">
+  &nbsp;
+  <img src="docs/agent-sheet-phone.png" width="300" alt="One agent open on a phone: its question, the answer buttons and a reply box">
+</p>
+<p align="center"><img src="docs/agents-desktop.png" width="720" alt="The Agents tab on a wide screen"></p>
+
+## Your body
+
+The Life RPG turns looking after yourself into XP:
+
+- **Log a workout with one tap:** gym and volleyball out of the box. The activities are config: add running, swimming or climbing in a few lines.
+- **Log a meal with a photo or a sentence.** Claude (Haiku, with Sonnet when unsure) estimates the items, calories and protein, and you can correct it in plain words. It learns from your corrections.
+- **Levels, skill trees, weekly quests and streaks** are computed from those events, so changing a rule rescores your whole history.
+- **Your avatar.** With your own sprite sheets, it wears what you did today: gym clothes after the gym, the jersey after a match. Without them, a drawn pixel avatar stands in.
+- **Docked to a TV**, the Switch shows the game full screen.
 
 <p align="center"><img src="docs/game.png" width="720" alt="The Life RPG game screen: avatar, skill trees, weekly quests, today's macros"></p>
+<p align="center"><img src="docs/panel-phone.png" width="300" alt="The panel on a phone: the Life card with quests, streaks, calories and protein, and one-tap logging"></p>
 
-## What's in it
+## Your machines
 
 - **One codebase, many panels.** Each machine runs `admin/app.py` (Python standard library only; phone alerts also need `python3-cryptography`) with its own config. A panel can show any other panel's cards (`"desk.agents"` is the workstation's agents card, shown on the Pi), and taps, sheets and actions are forwarded to the panel that owns them.
-- **An agent pager.** Coding agents (Claude Code, Codex…) running in your terminals show up with their live screen and whether they need you. When one waits on you, the touchscreen chimes and opens it with answer buttons (PC work, Go ahead, No, 1/2/3), and the Joy-Cons answer: ↑/↓ choose, A presses (the highlight starts on PC work, the safe answer), B means "I'll handle it at the PC", R jumps to the next waiting agent. Your phone gets a push alert after a minute.
 - **Your PCs.** CPU, GPU, temperatures, wall power against the PSU, services you can restart, a fixed list of commands (never a free shell), Wake-on-LAN from the always-on Pi, and Sleep.
 - **The Pi.** Temperature graph, throttling and under-voltage flags, fan, 5 V supply, NVMe, a Docker stack with Home Assistant (lights, alarm, cameras), and uptime checks for your servers with phone alerts when one goes down.
-- **A Nintendo Switch as the house touchscreen.** Switchroot Ubuntu in kiosk mode on a USB-C stand. Docked to a TV, it shows the game instead.
-- **Life RPG.** Log a gym session or a run with one tap, or a meal with a photo: Claude (Haiku, with Sonnet when unsure) estimates the items and macros, and you can correct it in plain words. XP, levels, skill trees, weekly quests and streaks are computed from those events, so changing a rule rescores your whole history. Activities, skills and avatars are config.
-
-<p align="center"><img src="docs/panel-phone.png" width="300" alt="The panel on a phone: the Life card, Home Assistant, PCs"></p>
+- **A Nintendo Switch as the house touchscreen.** Switchroot Ubuntu in kiosk mode on a USB-C stand: the agent pager and your home. Docked to a TV, it shows the game instead.
 
 ## How it fits together
 
