@@ -3,6 +3,7 @@ Tap one to see its screen, answer it, or interrupt it."""
 import json
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -124,12 +125,37 @@ def sample(cfg):
     STATE["agents"] = {"at": now, "items": items}
 
 
-def item_row(a):
-    lvl, label = STATUS[a["status"]]
-    return (f'<button class="agent s-{e(a["status"])}" data-sheet="agents/view/{e(a["handle"])}">'
-            f'<i class="dot {lvl}"></i><span class="who"><b>{e(a["title"])}</b>'
-            f'<small>{e(a["summary"] or a["agent"])}</small></span>'
-            f'<span class="when"><span class="pill {lvl}">{label}</span><small>{ago(a["age"])}</small></span></button>')
+LEVELS_FRESH = 2  # seconds one levels() read serves every card of a poll (agents, overview, agenthealth)
+_levels = {}  # agent log path -> (read at, levels)
+_levels_lock = threading.Lock()
+
+
+def levels():
+    """agenthealth.levels() for the creatures, or {} (all at level 1) when the agent log can't be read.
+    Read once per LEVELS_FRESH: three cards ask on every poll."""
+    from modules import agenthealth, agentlog
+    with _levels_lock:
+        hit = _levels.get(agentlog.DB_PATH)
+        if hit and time.monotonic() - hit[0] < LEVELS_FRESH:
+            return hit[1]
+        try:
+            lv = agenthealth.levels()
+        except Exception:  # cards re-render every 3 s: a creature's level isn't worth an error or a log line
+            lv = {}
+        _levels[agentlog.DB_PATH] = (time.monotonic(), lv)
+        return lv
+
+
+def item_row(a, levels=None):
+    """An agent's row. Its creature is a placeholder the page draws (KIOSK_JS critters(): seed "project|agent",
+    status, level from levels(), agent); its ring keeps the status colour the dot had."""
+    tone, label = STATUS[a["status"]]
+    level = (levels or {}).get((a["project"], a["agent"]), 1)
+    return (f'<button class="agent crow s-{e(a["status"])}" data-sheet="agents/view/{e(a["handle"])}">'
+            f'<i class="critter {tone}" data-seed="{e(a["project"])}|{e(a["agent"])}" data-status="{e(a["status"])}" '
+            f'data-level="{int(level)}" data-agent="{e(a["agent"])}" aria-hidden="true"></i>'
+            f'<span class="who"><b>{e(a["title"])}</b><small>{e(a["summary"] or a["agent"])}</small></span>'
+            f'<span class="when"><span class="pill {tone}">{label}</span><small>{ago(a["age"])}</small></span></button>')
 
 
 def card(cfg):
@@ -145,6 +171,7 @@ def card(cfg):
     out = ['<div class="counts">' + "".join(
         f'<span class="pill {STATUS[k][0]}">{counts[k]} {STATUS[k][1]}</span>' for k in STATUS) + "</div>"]
     host = project = None
+    lv = levels()
     for a in s["items"]:
         if a["host"] != host:
             host, project = a["host"], None
@@ -152,7 +179,7 @@ def card(cfg):
         if a["project"] != project:
             project = a["project"]
             out.append(f'<div class="project">{e(project)}<small>{e(a["branch"])}</small></div>')
-        out.append(item_row(a))
+        out.append(item_row(a, lv))
     return "".join(out)
 
 
@@ -267,6 +294,25 @@ def defer(cfg, handle, body):
     a["status"] = "atpc"
     print(f"agents.defer {a['host']}/{a['project']}/{a['title']!r}", flush=True)
     return f"{a['title']} is saved for the PC."
+
+
+def tiles(cfg):
+    """Home tile (app.py): how many agents need you (a tap opens the first), else how many are working."""
+    s = STATE.get("agents") or {}
+    if s.get("error") or "items" not in s:  # no sample yet, or Orca is off: the card says why
+        return []
+    items = s["items"]
+    waiting = [a for a in items if a["status"] == "waiting"]
+    working = sum(a["status"] in ("working", "stuck") for a in items)
+    if waiting:
+        a = waiting[0]
+        value, tint = f"{len(waiting)} need{'s' if len(waiting) == 1 else ''} you", "need"
+        open_ = {"sheet": f"agents/view/{a['handle']}", "title": f"🔔 {a['title']} · {a['project']}"}
+    else:
+        value = f"{working} working" if working else "All idle" if items else "None running"
+        tint, open_ = ("busy" if working else None), {"tab": "agents"}
+    return [{"key": "agents", "label": "Agents", "value": value, "tint": tint, "icon": "terminal",
+             "open": open_, "span": 1, "order": 10}]
 
 
 ACTIONS = {"send": send, "defer": defer}

@@ -23,6 +23,7 @@ computed from them on every read (the rules below), so changing a rule rescores 
   quest is behind.
 
 Goals (calorie and macro targets, sessions a week) are set from the card and kept in the database.
+tiles(): the avatar, the current quest and today's calories for the Home grid.
 
 config "life" (every key optional):
   "name"          shown in the game, and in the meal prompt ("Ana")
@@ -108,6 +109,8 @@ _ready = threading.Lock()
 _made = []
 _ver = [0]  # bumped on every write here; with the file stamps, the computed game is cached until a change
 _cache = {}
+FRESH = 2  # seconds game() is reused without even checking the stamps: the card, the tiles and every poll share it
+_game_lock = threading.RLock()
 
 MEAL_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["title", "items", "confidence", "note"],
@@ -275,6 +278,19 @@ def _end_of(day):
 
 
 def game(cfg):
+    """The whole game state (_game), computed once per FRESH for the same database, config and writes here,
+    however many cards, tiles and clients ask; a write from this process (_ver) shows at once."""
+    quick = (DB_PATH, _ver[0], date.today(), json.dumps(cfg or {}, sort_keys=True, default=str))
+    with _game_lock:
+        hit = _cache.get("fresh")
+        if hit and hit[0] == quick and time.monotonic() - hit[1] < FRESH:
+            return hit[2]
+        g = _game(cfg)
+        _cache["fresh"] = (quick, time.monotonic(), g)
+        return g
+
+
+def _game(cfg):
     R = rules(cfg)
     today, now = date.today(), time.time()
     key = (_ver[0], _stamp(), today, R["key"], night.next_wake(cfg, now), json.dumps((cfg or {}).get("night")))
@@ -638,11 +654,45 @@ def _fmt(v, unit=""):
     return f"{v:,.0f}{unit}"
 
 
+def _face(s):
+    """The avatar's markup: frame 0 of the sprite strip (the frame's own aspect ratio crops the rest), as the game
+    does, or the drawn SVG. Built here from numbers and our own URL; remote.py prefixes its src="file/…"."""
+    sp = s["sprite"]
+    if sp:
+        return (f'<span class="frame" style="aspect-ratio:{int(sp["w"])}/{int(sp["h"])}">'
+                f'<img src="{e(sp["url"])}" alt=""></span>')
+    return s["avatar"]
+
+
+QUEST_ICONS = {"gym": "dumbbell", "volleyball": "ball"}
+
+
+def tiles(cfg):
+    """Home tiles (app.py): the avatar (two rows: level, title and XP; a tap opens the game), this week's first
+    unfinished quest, and today's calories (a tap adds a meal)."""
+    s = game(cfg)
+    out = [{"key": "avatar", "label": f'Level {s["level"]} · {s["title"]}', "value": f'{s["into"]} / {s["span"]} XP',
+            "progress": s["into"] / s["span"] if s["span"] else 0, "avatar_html": _face(s), "tint": None, "icon": None,
+            "open": {"page": "life/game"}, "span": 2, "order": 50}]
+    quests = s["quests"]
+    q = next((q for q in quests if not q["done"]), quests[0] if quests else None)
+    if q:
+        out.append({"key": "quest", "label": q["name"].split(" ×")[0],
+                    "value": "Done this week" if q["done"] else f'{q["have"]} of {q["need"]} this week',
+                    "tint": "ok" if q["done"] else "on", "icon": QUEST_ICONS.get(q["key"], "flag"),
+                    "open": {"page": "life/game"}, "span": 1, "order": 80})
+    t = s["today"]
+    goal = t["goals"].get("kcal")
+    out.append({"key": "meal", "label": "Meal",
+                "value": f'{_fmt(t["kcal"])} / {_fmt(goal)} kcal' if goal else f'{_fmt(t["kcal"])} kcal today',
+                "tint": "warn" if goal and t["kcal"] > 1.1 * goal else None, "icon": "camera",
+                "open": {"sheet": "life/add/meal", "title": "Add a meal"}, "span": 1, "order": 100})
+    return out
+
+
 def card(cfg):
     s = game(cfg)
-    sp = s["sprite"]  # frame 0 of the strip (the frame's own aspect ratio crops the rest), as the game does
-    face = (f'<span class="frame" style="aspect-ratio:{int(sp["w"])}/{int(sp["h"])}"><img src="{sp["url"]}" alt=""></span>'
-            if sp else s["avatar"])
+    face = _face(s)
     out = [f'<div class="life-top"><span class="av">{face}</span><div><b>Level {s["level"]} · {e(s["title"])}</b>'
            f'{bar(s["into"] / s["span"])}<small>{s["into"]}/{s["span"]} XP to level {s["level"] + 1}</small></div></div>']
     b = s["bars"]

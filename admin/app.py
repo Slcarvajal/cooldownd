@@ -13,7 +13,10 @@ A remote accepts the Tailscale login header or the shared token in
 SCREEN_PORT adds a second 127.0.0.1 listener for the hub's own touchscreen; it's
 never published, so it skips the Tailscale login check.
 
-/live returns {"cards", "waiting", "pager", "notices", "quiet"}:
+/live returns {"cards", "waiting", "pager", "notices", "quiet", "tiles", "grid"}:
+  tiles    {module: [tile]} every module's Home tiles, validated (clean_tile); a remote panel reads its
+           modules' tiles from here, as it reads their cards.
+  grid     the Home grid's HTML for this listener (the kiosk's fits 5 × 3 cells, see grid_html).
   notices  [{id, text, until}] kiosk notices from common.STATE["notices"] (the desk's presence
            module) plus the remotes' (remote.notices), one per global id, expired ones dropped.
            The kiosk toasts each new id once.
@@ -36,12 +39,30 @@ Modules (modules/*.py, enabled in config.json) each provide:
   PAGES   = {name: fn(cfg, arg) -> HTML}           full-screen pages at /page/<module>/<name>
   UPLOADS = {action: max bytes}                     actions that take more than 64 KB (photos)
   sample(cfg), SAMPLE_EVERY   optional background sampler (fills common.STATE)
+  tiles(cfg) -> [tile]        optional Home tiles, called on every live poll; data only, app.py renders them:
+    key          str, unique within the module
+    label, value str, the tile's two lines (escaped here)
+    tint         "on" | "need" | "busy" | "ok" | "warn" | "bad" | None (grey)
+    icon         a name in common.ICONS, or None
+    open         what a tap does, or None (the tap scrolls to the module's card):
+                   {"tab": "<tab>"}, {"sheet": "<module>/<sheet>/<arg>", "title": "…"},
+                   {"action": "<module>/<action>[/<arg>]", "confirm"?: "…"} (a toggle such as a light),
+                   {"page": "<module>/<page>"}
+                 <module> is the tile's own module; <arg> is letters, digits and _ . : @ - only; <tab> is one
+                 this panel shows. Anything else is dropped (clean_tile).
+    span        1, or 2 rows (the avatar)
+    order        int, lower first; the clock (built here) is always first
+    progress     optional 0..1, a bar under the label (XP)
+    avatar_html  optional markup the module builds itself (life's avatar); shown above the label, not escaped
+  The Home tab starts with the grid of tiles, the cards below it. A remote module's tiles come with its card
+  (modules/remote.py), their sheet / action / page targets prefixed so taps forward to the panel that owns them.
 """
 import hmac
 import html
 import importlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -51,7 +72,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python -I leaves the script dir off sys.path
-from modules.common import STATE, token_ok  # noqa: E402
+from modules.common import ICONS, STATE, icon, token_ok  # noqa: E402
 
 PORT = int(os.environ.get("ADMIN_PORT", "8095"))
 CONFIG_PATH = os.environ.get("ADMIN_CONFIG") or os.path.join(HERE, "config.json")  # config.pi.json on the Pi
@@ -83,6 +104,178 @@ function rumble(ms) {
     const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(g => g && g.connected);
     gp?.vibrationActuator?.playEffect('dual-rumble', {duration: ms, strongMagnitude: 0.8, weakMagnitude: 0.4})?.catch(() => {});
   } catch (e) {}
+}
+// Agent creatures: one little pixel creature per agent, drawn from its seed alone, so it looks the same on every
+// panel and page. The seed is "project|agent" (crSeed; agents.item_row writes the same), so it keeps its look across
+// terminals and levels up with that project's agent (agenthealth.level).
+// critter(seed, status, level, kind) -> SVG markup made only of numbers and fixed colours: no text from the seed
+// or anyone else ends up in it, so it goes into innerHTML as is.
+// - Body: the left half of an N x N grid filled by a seeded PRNG (FNV-1a hash, mulberry32), denser near the
+//   middle, mirrored, and cut to what's connected to a fixed core (the middle column, the head round the eyes, the
+//   legs). A dark outline round everything, a hue from the seed, a lighter belly, darker feet.
+// - Level: 1-2 an 8 x 8 body; 3-5 10 x 10 with horns or antennae; 6+ 12 x 12 with a crown or wings. All share one
+//   frame (CR_BOX), so a bigger one looks bigger.
+// - Kind (the agent): "claude" a small four-point spark above the head, "codex" a square visor, others nothing.
+// - Status changes only the eyes and the extras: working open eyes; waiting wide, raised eyes and a "!" bubble;
+//   idle closed eyes and a "z"; stuck x eyes and smoke; atpc eyes looking down and a small monitor.
+// The motion is CSS (CR_CSS, added to the page once): none with prefers-reduced-motion, at night (.cr-still on
+// <html>) or on the dimmed night face.
+const CR_STATUS = ['working', 'waiting', 'idle', 'stuck', 'atpc'];
+const CR_INK = '#1b1730';
+// a 12 x 12 body at 0,0 plus room for the outline, headgear, wings and extras, and headroom for the motion (CR_CSS
+// keeps every move inside it, and .cr clips to it, so nothing leaves the creature's box)
+const CR_BOX = '-3.25 -5.5 18.5 18.5';
+const crSeed = m => String((m && m.project) || '') + '|' + String((m && m.agent) || '');
+function crHash(s) {  // FNV-1a, 32 bit
+  let h = 0x811c9dc5;
+  for (const ch of String(s)) h = Math.imul(h ^ ch.codePointAt(0), 0x01000193) >>> 0;
+  return h;
+}
+function crRandom(a) {  // mulberry32: a seeded PRNG in [0, 1)
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), a | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function critter(seed, status, level, kind) {
+  const st = CR_STATUS.includes(status) ? status : 'idle', lv = Math.floor(Number(level)) || 1;
+  const N = lv >= 6 ? 12 : lv >= 3 ? 10 : 8, h = N / 2, ox = (12 - N) / 2, oy = 12 - N;  // centred, standing on y = 12
+  const rnd = crRandom(crHash(seed));
+  // the colours and the headgear first, so they stay the same when it evolves
+  const hue = Math.floor(rnd() * 360), sat = 60 + Math.floor(rnd() * 16), lit = 54 + Math.floor(rnd() * 8);
+  const horns = rnd() < 0.5, crown = rnd() < 0.5;
+  const half = [];  // the left half, row by row; column h - 1 touches the mirror line
+  for (let r = 0; r < N; r++) {
+    half.push([]);
+    for (let c = 0; c < h; c++) half[r].push(rnd() < 0.95 - 0.45 * (h - 1 - c) / h - (r === 0 || r === N - 1 ? 0.4 : 0));
+  }
+  const eyeR = 1 + Math.floor(N / 4), eyeC = h - 2, leg = Math.floor(rnd() * (h - 1));
+  for (let r = 1; r < N - 1; r++) half[r][h - 1] = true;
+  for (let r = eyeR - 1; r <= eyeR + 1; r++) for (let c = eyeC - 1; c < h; c++) half[r][c] = true;
+  for (let c = leg; c < h; c++) half[N - 2][c] = true;
+  half[N - 1][leg] = true; half[N - 1][h - 1] = false;  // a leg each side, a gap between them
+  const keep = half.map(row => row.map(() => false)), todo = [[1, h - 1]];
+  while (todo.length) {
+    const [r, c] = todo.pop();
+    if (r < 0 || r >= N || c < 0 || c >= h || keep[r][c] || !half[r][c]) continue;
+    keep[r][c] = true; todo.push([r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]);
+  }
+  const cells = new Map(), put = (x, y, fill) => cells.set(x + ',' + y, [x, y, fill]);
+  const both = (c, y, fill) => { put(ox + c, y, fill); put(ox + N - 1 - c, y, fill) };  // c in the left half
+  const body = `hsl(${hue},${sat}%,${lit}%)`, belly = `hsl(${hue},${sat + 10}%,${lit + 22}%)`, feet = `hsl(${hue},${sat - 6}%,${lit - 16}%)`;
+  const bellyRows = N >= 10 ? [eyeR + 2, eyeR + 3] : [eyeR + 2];
+  for (let r = 0; r < N; r++) for (let c = 0; c < h; c++)
+    if (keep[r][c]) both(c, oy + r, r === N - 1 ? feet : c >= h - 2 && bellyRows.includes(r) ? belly : body);
+  const top = c => { let r = 0; while (r < N && !keep[r][c]) r++; return oy + r };
+  if (N === 10) {
+    const a = eyeC - 1, t = top(a);
+    if (horns) { both(a, t - 1, '#f3e9d2'); both(a - 1, t - 1, '#f3e9d2'); both(a - 1, t - 2, '#f3e9d2') }
+    else { both(a, t - 1, feet); both(a, t - 2, feet); both(a, t - 3, '#ffd84a') }
+  } else if (N === 12 && crown) {
+    const t = Math.min(top(h - 1), top(h - 2), top(h - 3));
+    for (let c = h - 3; c < h; c++) both(c, t - 1, c === h - 2 ? '#e0457b' : '#f5c542');
+    both(h - 3, t - 2, '#f5c542'); both(h - 1, t - 2, '#f5c542');
+  } else if (N === 12) {
+    const w = eyeR + 1;
+    let lc = h - 1;
+    for (let r = w - 1; r <= w + 1; r++) for (let c = 0; c < h; c++) if (keep[r][c]) { lc = Math.min(lc, c); break }
+    for (let r = w - 1; r <= w + 1; r++) both(lc - 1, oy + r, r === w + 1 ? '#b8c6ee' : '#eaf2ff');
+    if (lc >= 1) both(lc - 2, oy + w - 1, '#eaf2ff');
+  }
+  const k = String(kind || '').toLowerCase(), visor = k.includes('codex');
+  if (k.includes('claude')) [[0, -3], [-1, -2], [0, -2], [1, -2], [0, -1]].forEach(([x, y], i) => put(x, y, i === 2 ? '#fff4c2' : '#ffb347'));
+  if (visor) for (let c = eyeC - 1; c < h; c++) both(c, oy + eyeR, '#2b3550');
+  const ink = new Map(), byFill = new Map();
+  for (const [x, y, fill] of cells.values()) {
+    if (!byFill.has(fill)) byFill.set(fill, []);
+    byFill.get(fill).push([x, y]);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const key = (x + dx) + ',' + (y + dy);
+      if (!cells.has(key)) ink.set(key, [x + dx, y + dy]);
+    }
+  }
+  const path = (pts, fill) => {  // one path per colour, each row's runs merged
+    pts.sort((p, q) => p[1] - q[1] || p[0] - q[0]);
+    let d = '';
+    for (let i = 0; i < pts.length;) {
+      const [x, y] = pts[i];
+      let w = 1;
+      while (i + w < pts.length && pts[i + w][1] === y && pts[i + w][0] === x + w) w++;
+      d += `M${x} ${y}h${w}v1h${-w}z`; i += w;
+    }
+    return `<path fill="${fill}" d="${d}"/>`;
+  };
+  const f = v => +v.toFixed(2), rect = (x, y, w, hh, fill) => `<rect x="${f(x)}" y="${f(y)}" width="${f(w)}" height="${f(hh)}" fill="${fill}"/>`;
+  const eye = visor ? '#7ff0ff' : CR_INK, ey = oy + eyeR;
+  const EYE = {
+    working: x => rect(x, ey, 1, 1, eye) + rect(x, ey, 0.4, 0.4, '#fff'),
+    waiting: x => rect(x, ey - 0.6, 1, 1.6, '#fff') + rect(x + 0.25, ey - 0.35, 0.5, 0.8, CR_INK),
+    idle: x => rect(x, ey + 0.4, 1, 0.3, eye),
+    stuck: x => [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]].map(([i, j]) => rect(x + i / 3, ey + j / 3, 1 / 3, 1 / 3, eye)).join(''),
+    atpc: x => rect(x, ey, 1, 1, '#fff') + rect(x, ey + 0.5, 1, 0.5, CR_INK),
+  }[st];
+  const z = (x, y, s) => '<g>' + [[0, 0], [1, 0], [2, 0], [3, 0], [2, 1], [1, 2], [0, 3], [1, 3], [2, 3], [3, 3]]
+    .map(([i, j]) => rect(x + i * s, y + j * s, s, s, '#7c8cff')).join('') + '</g>';
+  const extra = {
+    working: '',
+    waiting: rect(10.75, -3.9, 3.5, 3.8, CR_INK) + rect(11.2, -0.4, 1, 0.9, CR_INK) + rect(11, -3.65, 3, 3.3, '#ff9f0a')
+      + rect(11.45, -0.45, 0.5, 0.65, '#ff9f0a') + rect(12.25, -3.2, 0.5, 1.6, '#fff') + rect(12.25, -1.25, 0.5, 0.5, '#fff'),
+    idle: z(10.6, -1.5, 0.35) + z(12, -3.9, 0.5),
+    stuck: rect(10.4, -0.7, 1.6, 1.6, '#8e8e99') + rect(11.6, -2.4, 1.3, 1.3, '#a9a9b4') + rect(10.8, -3.9, 1, 1, '#c4c4cc'),
+    atpc: rect(11.75, 7.4, 2.6, 2.1, '#bf5af2') + rect(12.1, 7.75, 1.9, 1.4, '#2a1840') + rect(12.8, 9.5, 0.5, 0.7, '#bf5af2')
+      + rect(12.3, 10.2, 1.5, 0.4, '#bf5af2'),
+  }[st];
+  return `<svg class="cr st-${st}" viewBox="${CR_BOX}" shape-rendering="crispEdges" aria-hidden="true"><g class="cr-b">`
+    + path([...ink.values()], CR_INK) + [...byFill].map(([fill, pts]) => path(pts, fill)).join('')
+    + `<g class="cr-e">${EYE(ox + eyeC) + EYE(ox + N - 1 - eyeC)}</g></g><g class="cr-x">${extra}</g></svg>`;
+}
+const CR_CSS = `.cr{display:block;width:100%;height:100%;overflow:hidden}
+.cr g,.cr rect{transform-box:fill-box;transform-origin:50% 100%}
+.cr.st-working .cr-b{animation:cr-bob .5s ease-in-out infinite alternate}
+.cr.st-waiting .cr-b,.cr.st-waiting .cr-x{animation:cr-hop 1.2s ease-out infinite}
+.cr.st-stuck .cr-b{animation:cr-shake .45s linear infinite}
+.cr.st-stuck .cr-x rect{animation:cr-smoke 2.4s ease-out infinite backwards}
+.cr.st-stuck .cr-x rect:nth-child(2){animation-delay:.8s}.cr.st-stuck .cr-x rect:nth-child(3){animation-delay:1.6s}
+.cr.st-idle .cr-b{animation:cr-breathe 3.2s ease-in-out infinite}
+.cr.st-idle .cr-x g{animation:cr-z 3.2s ease-in-out infinite backwards}.cr.st-idle .cr-x g:nth-child(2){animation-delay:1.6s}
+@keyframes cr-bob{to{transform:translateY(-.6px)}}
+@keyframes cr-hop{0%,45%,100%{transform:none}20%{transform:translateY(-1.4px)}}
+@keyframes cr-shake{25%{transform:translateX(-.35px)}75%{transform:translateX(.35px)}}
+@keyframes cr-breathe{50%{transform:scaleY(.93)}}
+@keyframes cr-smoke{0%{opacity:0;transform:translateY(1px) scale(.6)}35%{opacity:.9}100%{opacity:0;transform:translateY(-1.4px) scale(1.15)}}
+@keyframes cr-z{0%{opacity:0;transform:translate(0,1px)}30%{opacity:1}100%{opacity:0;transform:translate(.3px,-1.4px)}}
+@media (prefers-reduced-motion:reduce){.cr *{animation:none!important}}
+.cr-still .cr *,#face.quiet .cr *{animation:none!important}`;
+function critterStyle() {
+  if (typeof document === 'undefined' || document.getElementById('cr-css')) return;
+  const s = document.createElement('style');
+  s.id = 'cr-css'; s.textContent = CR_CSS; document.head.appendChild(s);
+}
+critterStyle();
+// Draws every placeholder under root, <i class="critter" data-seed data-status data-level data-agent> from
+// agents.item_row (cards come as HTML, a remote's too), once per element and attribute set. keep (crKeep, taken
+// before a card's HTML is replaced) holds the drawn creatures it had: one with the same attributes is moved
+// into the new placeholder instead of drawn again.
+function critters(root, keep) {
+  (root || document).querySelectorAll('.critter[data-seed]').forEach(el => {
+    const d = el.dataset, key = [d.seed, d.status, d.level, d.agent].join('\n');
+    if (el.crKey === key) return;
+    const old = keep && keep.get(key) && keep.get(key).shift();
+    el.crKey = key;
+    if (old) { el.textContent = ''; old.forEach(n => el.appendChild(n)) } else el.innerHTML = critter(d.seed, d.status, d.level, d.agent);
+  });
+}
+// The drawn creatures under root, by attribute set: Map key -> [[their nodes], ...] for critters(root, keep).
+function crKeep(root) {
+  const keep = new Map();
+  root.querySelectorAll('.critter[data-seed]').forEach(el => {
+    if (el.crKey === undefined) return;
+    if (!keep.has(el.crKey)) keep.set(el.crKey, []);
+    keep.get(el.crKey).push([...el.childNodes]);
+  });
+  return keep;
 }"""
 
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -155,6 +348,9 @@ button.agent.s-waiting{background:#fff1e0}
 .agent .when{display:grid;justify-items:end;gap:3px}
 .dot{width:10px;height:10px;border-radius:50%;background:currentColor}.dot.busy{animation:pulse 1.2s infinite}
 .dot.ok{color:#30b050}.dot.busy{color:#0a84ff}.dot.warn{color:#f5a400}.dot.bad{color:#ff3b30}.dot.dim{color:#aeaeb2}.agent .dot.warn{color:#ff9f0a}
+button.agent.crow{grid-template-columns:40px 1fr auto}
+.critter{display:block;width:40px;height:40px;padding:3px;border-radius:50%;color:#aeaeb2;background:color-mix(in srgb,currentColor 14%,transparent);box-shadow:inset 0 0 0 2px currentColor}
+.critter.ok{color:#30b050}.critter.busy{color:#0a84ff}.critter.warn{color:#ff9f0a}.critter.bad{color:#ff3b30}.critter.dim{color:#aeaeb2}
 @keyframes pulse{50%{opacity:.35}}
 .counts{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
 .project{display:flex;justify-content:space-between;gap:12px;font-weight:600;margin:12px 0 0;font-size:14px}
@@ -187,6 +383,38 @@ transform:translateY(100%);transition:transform .25s,visibility .25s;visibility:
 .tile.tint-on,.quick .tint-on{background:var(--on);color:var(--on-fg)}.tile.tint-need,.quick .tint-need{background:var(--need);color:var(--need-fg)}
 .tile.tint-busy,.quick .tint-busy{background:var(--work);color:var(--work-fg)}.tile.tint-ok,.quick .tint-ok{background:var(--done);color:var(--done-fg)}
 .tile.tint-warn,.quick .tint-warn{background:var(--caution);color:var(--caution-fg)}.tile.tint-bad,.quick .tint-bad{background:var(--alert);color:var(--alert-fg)}
+/* Home grid (grid_html): 2 columns on a phone, 4 from 800 px, 5 from 1100 px; the kiosk fits 5 × 3 on its screen */
+.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
+.ht{border:0;border-radius:28px;padding:14px 16px;background:var(--idle);color:var(--idle-fg);display:flex;flex-direction:column;justify-content:flex-end;align-items:flex-start;gap:3px;min-width:0;min-height:112px;text-align:left;font:inherit;overflow:hidden}
+.ht .ic{width:28px;height:28px;margin-bottom:auto}
+.ht b{font-size:17px;font-weight:700;line-height:1.2;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ht small{font-size:14px;font-weight:600;line-height:1.25;color:inherit;max-width:100%;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.ht:not([class*=tint-]) small{color:var(--mute);font-weight:500}
+.ht.tint-on{background:var(--on);color:var(--on-fg)}.ht.tint-need{background:var(--need);color:var(--need-fg)}.ht.tint-busy{background:var(--work);color:var(--work-fg)}
+.ht.tint-ok{background:var(--done);color:var(--done-fg)}.ht.tint-warn{background:var(--caution);color:var(--caution-fg)}.ht.tint-bad{background:var(--alert);color:var(--alert-fg)}
+.ht-clock,.ht-av{background:var(--card);color:var(--fg)}
+.ht-clock{display:none;align-items:center;justify-content:center;gap:2px}
+.ht-clock b{font-size:56px;font-weight:600;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums}.ht-clock small{font-weight:600;letter-spacing:.06em}
+.ht.span2{grid-row:span 2;align-items:center;justify-content:center;text-align:center;order:-1;gap:6px}
+.ht-me{display:flex;align-items:flex-end;justify-content:center;height:100px;flex:none;max-width:100%}
+.ht-me .frame{position:relative;display:block;height:100%;overflow:hidden;animation:bob 2.4s ease-in-out infinite}
+.ht-me .frame img{position:absolute;left:0;top:0;height:100%;width:auto;max-width:none;image-rendering:pixelated}
+.ht-me>svg{height:100%;width:auto;aspect-ratio:1/1;animation:bob 2.4s ease-in-out infinite}
+.ht-xp{display:block;width:min(150px,80%);height:8px;border-radius:4px;background:var(--idle);overflow:hidden}.ht-xp i{display:block;height:100%;border-radius:4px;background:var(--violet)}
+.ht-banner{grid-column:1/-1;display:flex;flex-direction:column;gap:10px;border-radius:28px;padding:16px 18px;background:var(--need);color:var(--need-fg)}
+.ht-banner>div{display:flex;align-items:center;gap:10px;font-size:19px;font-weight:700}.ht-banner .ic{width:28px;height:28px}
+.ht-wait{border:0;background:#fff4e6;border-radius:18px;padding:10px 14px;display:grid;gap:2px;width:100%;text-align:left;font:inherit}
+.ht-wait b{font-size:16px;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ht-wait small{font-size:14px;color:#6b3300}
+@media (max-width:799px){.home-grid:has(.ht-banner) .ht-agents{display:none}}
+@media (min-width:800px){.home-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.ht-banner{display:none}
+.ht{border-radius:34px;align-items:center;justify-content:center;text-align:center;gap:6px;aspect-ratio:1/1;min-height:0;padding:14px}
+.ht .ic{width:38px;height:38px;margin-bottom:0}.ht b{font-size:19px}.ht small{font-size:15px}
+.ht-clock{display:flex}.ht.span2{order:0;aspect-ratio:auto}.ht-me{height:130px}}
+@media (min-width:1100px){.home-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:18px}.ht{aspect-ratio:6/5}
+.ht .ic{width:46px;height:46px}.ht b{font-size:21px}.ht small{font-size:17px}.ht.span2 b{font-size:22px}
+.ht-clock b{font-size:68px}.ht-clock small{font-size:18px}.ht-me{height:180px}}
+body.kiosk .home-grid{grid-template-columns:repeat(5,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr));height:calc(100vh - 170px);min-height:390px;gap:18px}
+body.kiosk .ht{aspect-ratio:auto;min-height:0}
 @media (min-width:900px){
 .pager{display:grid;grid-template-columns:minmax(0,470px) minmax(0,1fr);grid-template-rows:minmax(clamp(300px,50vh,440px),auto);gap:22px;margin:8px 0 10px}
 .pager .quick{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr));gap:16px;margin:0}
@@ -251,6 +479,7 @@ section .duo button.alt:not(.agent):not(.mini):not(.cmd){background:var(--idle);
 .face-date{font-size:26px;font-weight:600;color:#98989d;letter-spacing:.08em;padding:6px 28px;cursor:pointer}
 #fa-ring .tick{position:absolute;width:30px;height:8px;border-radius:4px}
 #fa-ring .tlabel{position:absolute;width:180px;margin-left:-90px;text-align:center;font-size:17px;font-weight:600;letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#fa-ring .tcr{position:absolute;width:180px;margin-left:-90px;display:flex;justify-content:center;gap:4px}#fa-ring .tcr i{display:block;width:56px;height:56px}
 #fa-mid{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}
 #fa-clock{font-size:min(33vh,19vw);line-height:1;font-weight:600;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
 #fa-count{font-size:32px;font-weight:700;letter-spacing:.04em;margin-top:10px;color:#98989d}#fa-count.need{color:#ff9f0a}
@@ -262,6 +491,8 @@ section .duo button.alt:not(.agent):not(.mini):not(.cmd){background:var(--idle);
 .fb-me{height:322px;max-width:400px;background-repeat:no-repeat;background-size:1600% 100%;background-position:0 0;image-rendering:pixelated;animation:fbob 2.4s ease-in-out infinite}
 .fb-svg{width:280px;height:280px;animation:fbob 2.4s ease-in-out infinite}.fb-svg svg{width:100%;height:100%}
 @keyframes fbob{50%{transform:translateY(-6px)}}
+.fb-party{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;max-width:400px}.fb-party i{display:block;width:72px;height:72px}
+.fb-party i.gone{filter:grayscale(1);opacity:.5}
 .fb-bar{width:320px;height:12px;border-radius:6px;background:#2c2c2e;overflow:hidden}.fb-bar i{display:block;height:100%;border-radius:6px;background:#bf5af2}
 .fb-sub{font-size:18px;color:#98989d}
 .fb-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:22px;justify-content:center}
@@ -291,6 +522,7 @@ const $ = s => document.querySelector(s);
 const store = { get(k) { try { return localStorage.getItem(k) } catch (e) { return null } },
                 set(k, v) { try { localStorage.setItem(k, v) } catch (e) {} } };
 let sheetPath = null, lastOk = Date.now();
+const cardHtml = {};  // card id -> the HTML last put in it: its creatures (critters()) change innerHTML afterwards
 let faceOn = false, lastInput = Date.now(), swallowUntil = 0;  // the kiosk's ambient faces, further down
 
 function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 3500) }
@@ -303,14 +535,21 @@ function showTab(tab) {
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 showTab(document.querySelector(`nav button[data-tab="${store.get('tab')}"]`) ? store.get('tab') : 'home');
 
+let liveSeq = 0;  // a slow /live answer must not paint over a newer one
 async function live() {
   if (document.hidden) return;
+  const seq = ++liveSeq;
   try {
     const r = await fetch('live', {cache: 'no-store'}); if (!r.ok) throw 0;
     const d = await r.json();
-    for (const [id, html] of Object.entries(d.cards)) { const el = document.getElementById('m-' + id); if (el && el.innerHTML !== html) el.innerHTML = html }
+    if (seq !== liveSeq) return;
+    for (const [id, html] of Object.entries(d.cards)) {
+      const el = document.getElementById('m-' + id);
+      if (el && cardHtml[id] !== html) { cardHtml[id] = html; const keep = crKeep(el); el.innerHTML = html; critters(el, keep) }
+    }
+    const grid = $('#home-grid'); if (grid && typeof d.grid === 'string' && d.grid !== gridHtml) { gridHtml = d.grid; gridUpdate(grid, d.grid); clockTile() }
     const badge = $('#badge-agents'); if (badge) { badge.textContent = d.waiting || ''; badge.hidden = !d.waiting }
-    quietNow = !!d.quiet; pager(d.pager || []); notices(d.notices || []); if (faceOn) drawFace();
+    quietNow = !!d.quiet; document.documentElement.classList.toggle('cr-still', quietNow); pager(d.pager || []); notices(d.notices || []); if (faceOn) drawFace();
     lastOk = Date.now(); $('#live').classList.remove('stale'); $('#live-t').textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
   } catch (e) { if (Date.now() - lastOk > 10000) $('#live').classList.add('stale') }
 }
@@ -321,6 +560,37 @@ function hello() {
     + '<small class="muted">' + d.toLocaleDateString([], {weekday: 'long', day: 'numeric', month: 'long'}) + '</small>';
 }
 hello(); setInterval(hello, 60000);
+// The Home grid, tile by tile (data-tile keys, see grid_html): a tile whose HTML is the same stays as it is, so a
+// tap on it, the avatar's motion and its sprite survive another tile's value changing (the Desktop's watts, every
+// sample). A changed tile is replaced; a new, gone or moved one is added, removed or moved. el.tileSrc is the HTML a
+// tile was built from (the clock's is filled in afterwards, so its outerHTML differs).
+let gridHtml = null;
+function gridUpdate(grid, html) {
+  const t = document.createElement('template'); t.innerHTML = html;
+  const fresh = [...t.content.children], keys = fresh.map(el => el.dataset.tile);
+  if (keys.some(k => !k) || new Set(keys).size !== keys.length) { grid.innerHTML = html; return }  // no stable keys
+  const old = new Map([...grid.children].map(el => [el.dataset.tile, el]));
+  let at = grid.firstElementChild;  // the place the next tile goes
+  fresh.forEach((el, i) => {
+    const src = el.outerHTML, cur = old.get(keys[i]);
+    old.delete(keys[i]);
+    let node = cur;
+    if (!cur || cur.tileSrc !== src) {
+      node = el; el.tileSrc = src;
+      if (cur) { if (cur === at) at = cur.nextElementSibling; cur.remove() }
+    }
+    if (node === at) at = at.nextElementSibling; else grid.insertBefore(node, at);
+  });
+  old.forEach(el => el.remove());
+}
+document.querySelectorAll('#home-grid > *').forEach(el => { el.tileSrc = el.outerHTML });  // as served, before clockTile()
+// The Home grid's clock tile (grid_html leaves it empty): the time and the day, from this device's clock.
+function clockTile() {
+  const d = new Date(), hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  const day = d.toLocaleDateString([], {weekday: 'short', day: 'numeric'}).toUpperCase();
+  document.querySelectorAll('.ht-clock').forEach(c => { c.querySelector('b').textContent = hm; c.querySelector('small').textContent = day });
+}
+clockTile(); setInterval(clockTile, 5000);
 setInterval(live, 3000); document.addEventListener('visibilitychange', live); live();
 setInterval(() => { if (document.hidden) return;
   document.querySelectorAll('img[data-live]').forEach(i => { if (i.complete) i.src = i.src.replace(/\?t=\d+.*$/, '') + '?t=' + Date.now() }) }, 1000);
@@ -373,8 +643,8 @@ function notices(list) {
   store.set('notices', JSON.stringify(list.map(n => n.id)));
   fresh.forEach((n, i) => setTimeout(() => { toast(String(n.text || '')); if (!quietNow) chime() }, i * 4000));
 }
-// an agent's sheet, here or on a remote panel ("desk.agents/view/<handle>")
-const isAgentView = p => /^([\w-]+\.)*agents\/view\//.test(String(p));
+// an agent's sheet, here or on a remote panel ("desk.agents/view/<handle>"; the Stuck tile's agenthealth/view/<handle>)
+const isAgentView = p => /^([\w-]+\.)*(agents|agenthealth)\/view\//.test(String(p));
 function openAgent(a) { padSel = 0; openSheet(a.sheet, '🔔 ' + a.title + ' · ' + a.project) }
 function pager(list) {
   waitingNow = list;
@@ -387,6 +657,7 @@ function pager(list) {
   if (busy) toast('🔔 ' + fresh.title + ' needs you. Press R on the Joy-Con.'); else openAgent(fresh);
 }
 %%KIOSK_JS%%
+critters();
 let padPrev = {};
 let padSel = 0;  // highlighted answer button; 0 is PC work, the safe default
 function markSel() { document.querySelectorAll('#sheet-body .quick button').forEach((b, i) => b.classList.toggle('sel', i === padSel)) }
@@ -466,7 +737,8 @@ async function loadFace() {
   if (faceOn) drawFace();
 }
 // Agents face: the clock, how many agents need you, and a ring of ticks along the screen's edge, one segment
-// per agent coloured by its status. Without the party (desk asleep), the waiting agents from /live.
+// per agent coloured by its status, with each project's agents as creatures (critter) by its label. Without the
+// party (desk asleep), the waiting agents from /live, without creatures.
 function agentsFace() {
   const list = faceParty || waitingNow.map(a => ({project: a.project, title: a.title, status: 'waiting'}));
   const need = list.filter(a => a.status === 'waiting').length;
@@ -496,7 +768,7 @@ function ringTicks(W, H, N) {
   return out;
 }
 function ring(list) {
-  const W = innerWidth, H = innerHeight, key = W + 'x' + H + JSON.stringify(list.map(a => [a.project, a.status]));
+  const W = innerWidth, H = innerHeight, key = W + 'x' + H + JSON.stringify(list.map(a => [a.project, a.status, a.agent, a.level]));
   if (key === ringKey) return;
   ringKey = key;
   const k = list.length, per = k ? Math.max(3, Math.floor(60 / k)) : 60, cx = W / 2, cy = H / 2, out = [];
@@ -507,18 +779,25 @@ function ring(list) {
     const alpha = !a ? 0.35 : st === 'working' ? 0.45 + 0.55 * inSeg / Math.max(1, per - 2) : 1;
     out.push(`<i class="tick" style="left:${(cx + x - 15).toFixed(1)}px;top:${(cy + y - 4).toFixed(1)}px;transform:rotate(${deg.toFixed(1)}deg);background:${FACE_COLOR[st]};opacity:${alpha.toFixed(2)}"></i>`);
     if (a && k <= 12 && inSeg === Math.floor((per - 1) / 2) && (g === 0 || list[g - 1].project !== a.project)) {
-      const len = Math.hypot(x, y) || 1;
-      out.push(`<span class="tlabel" style="left:${(cx + x - x / len * 74).toFixed(1)}px;top:${(cy + y - y / len * 56 - 10).toFixed(1)}px;color:${st === 'idle' ? '#8E8E93' : FACE_COLOR[st]}">${esc(a.project || a.title || '')}</span>`);
+      // inward along the radius: on the sides by half the label's width plus a tick, so the label clears the ticks
+      const len = Math.hypot(x, y) || 1, lx = cx + x - x / len * 112, ly = cy + y - y / len * 56 - 10;
+      out.push(`<span class="tlabel" style="left:${lx.toFixed(1)}px;top:${ly.toFixed(1)}px;color:${st === 'idle' ? '#8E8E93' : FACE_COLOR[st]}">${esc(a.project || a.title || '')}</span>`);
+      // the project's agents as creatures, up to 3, on the inner side of the label (party members only: they have an agent)
+      const mates = [];
+      for (let j = g; j < k && list[j].project === a.project && mates.length < 3; j++) if (list[j].agent) mates.push(list[j]);
+      if (mates.length) out.push(`<span class="tcr" style="left:${lx.toFixed(1)}px;top:${(y < 0 ? ly + 26 : ly - 60).toFixed(1)}px">${mates.map(m => `<i>${critter(crSeed(m), m.status, m.level, m.agent)}</i>`).join('')}</span>`);
     }
   });
   $('#fa-ring').innerHTML = out.join('');
 }
-// Body face: the avatar (frame 0 of its sprite strip, or the drawn one), level and XP, the HP / Energy /
-// Stamina rings (no HP without sleep data), the weekly boss and this week's quests.
+// Body face: the avatar (frame 0 of its sprite strip, or the drawn one) with the desk's agents as creatures under
+// it, level and XP, the HP / Energy / Stamina rings (no HP without sleep data), the weekly boss and this week's quests.
 function bodyFace() {
   const S = faceLife && typeof faceLife === 'object' ? faceLife : null;
   $('.fb-stage').style.setProperty('--k', Math.min(innerWidth / 1280, innerHeight / 720));
-  const key = S ? JSON.stringify([S.level, S.title, S.into, S.span, S.sprite, S.avatar, S.bars, S.boss, S.quests, S.today, S.sleep, new Date().getDay()]) : '';
+  const party = S && Array.isArray(S.party) ? S.party.filter(m => m && typeof m === 'object').slice(0, 8) : [];
+  const key = S ? JSON.stringify([S.level, S.title, S.into, S.span, S.sprite, S.avatar, S.bars, S.boss, S.quests, S.today, S.sleep, new Date().getDay(),
+    party.map(m => [m.project, m.agent, m.status, m.level, !!m.forgotten])]) : '';
   if (key === bodyKey && key) return;
   bodyKey = key;
   if (!S) { $('#fb-main').innerHTML = '<div class="fb-left"><div class="fb-lvl">LOADING…</div></div>'; return }
@@ -544,7 +823,9 @@ function bodyFace() {
     <span>${boss.defeated ? 'Defeated' : left ? left + (left === 1 ? ' day left' : ' days left') : 'Last day'}</span></header>
     <div class="fb-bar"><i style="width:${pct(boss.hp, boss.max).toFixed(1)}%"></i></div>
     <small>${boss.defeated ? 'Every quest done this week.' : 'Each quest you finish hits it. Finish them all by Sunday to beat it.'}</small></div>`;
-  $('#fb-main').innerHTML = `<div class="fb-left"><div class="fb-lvl">${esc(('Level ' + num(S.level) + ' · ' + (S.title || '')).toUpperCase())}</div>${me}
+  // the desk's agents (the life state's party) as creatures standing under the avatar, forgotten ones greyed
+  const crew = party.length ? `<div class="fb-party">${party.map(m => `<i class="${m.forgotten ? 'gone' : ''}">${critter(crSeed(m), m.status, m.level, m.agent)}</i>`).join('')}</div>` : '';
+  $('#fb-main').innerHTML = `<div class="fb-left"><div class="fb-lvl">${esc(('Level ' + num(S.level) + ' · ' + (S.title || '')).toUpperCase())}</div>${me}${crew}
     <div class="fb-bar"><i style="width:${pct(S.into, S.span).toFixed(1)}%"></i></div><div class="fb-sub">${num(S.into)} / ${num(S.span)} XP to level ${num(S.level) + 1}</div></div>
     <div class="fb-right">${rings ? `<div class="fb-rings">${rings}</div>` : ''}${bossHtml}
     <div class="fb-quests">${quests.map(q => `<div class="fb-q${q.done ? ' done' : ''}"><b>${esc(q.name)}</b><small>${q.done ? 'Done' : num(q.have) + ' of ' + num(q.need)}</small></div>`).join('')}</div></div>`;
@@ -586,11 +867,17 @@ if (KIOSK) {
 document.addEventListener('click', async ev => {
   const a = ev.target.closest('[data-action]'), s = ev.target.closest('[data-sheet]'), k = ev.target.closest('[data-key]');
   const p = ev.target.closest('[data-push]'), ph = ev.target.closest('[data-photo]'), pg = ev.target.closest('[data-page]');
+  const tg = ev.target.closest('.ht[data-tab]'), go = ev.target.closest('.ht[data-goto]');  // Home tiles
   if (ph) { photoIn.dataset.post = ph.dataset.photo; photoIn.value = ''; photoIn.click() }
   else if (pg) location.href = '/page/' + pg.dataset.page;
   else if (p) { p.disabled = true; try { await pushOn(p) } catch (err) { toast('Alerts: ' + err.message) } p.disabled = false }
   else if (a) { if (a.dataset.confirm && !confirm(a.dataset.confirm)) return; a.disabled = true; await post(a.dataset.action); a.disabled = false }
-  else if (s) openSheet(s.dataset.sheet, s.querySelector('b')?.textContent || '');
+  else if (s) openSheet(s.dataset.sheet, s.dataset.title || s.querySelector('b')?.textContent || '');
+  else if (tg) showTab(tg.dataset.tab);
+  else if (go) {  // a tile with no target: its module's card
+    const el = document.getElementById('m-' + go.dataset.goto), pane = el?.closest('.pane');
+    if (pane) { showTab(pane.dataset.tab); el.closest('section').scrollIntoView({behavior: 'smooth', block: 'start'}) }
+  }
   else if (k) {
     if (document.body.dataset.sending) return;  // one answer at a time: no double taps
     document.body.dataset.sending = 1; document.querySelectorAll('[data-key]').forEach(b => b.disabled = true);
@@ -625,7 +912,7 @@ photoIn.onchange = async () => {
 function openFromHash() {
   const h = new URLSearchParams(location.hash.slice(1));
   const path = h.get('sheet') || '';
-  if (/^[\w.-]+\/[\w-]+\/[^/]*$/.test(path) && !path.includes('..')) { openSheet(h.get('sheet'), h.get('title') || ''); history.replaceState(null, '', location.pathname + location.search) }
+  if (/^[\w-]+(\.[\w-]+)*\/[\w-]+\/[\w.:@-]*$/.test(path) && !path.includes('..')) { openSheet(h.get('sheet'), h.get('title') || ''); history.replaceState(null, '', location.pathname + location.search) }
 }
 openFromHash(); addEventListener('hashchange', openFromHash);
 
@@ -694,21 +981,160 @@ def module(cfg, mods, name):
     return hit
 
 
-def live_payload(cfg, mods):
-    """What /live returns: every card, the waiting agents (here and on remotes), kiosk notices and night mode."""
-    from modules import night, remote
+def waiting(cfg):
+    """The agents waiting on you, here and on remotes: the pager's list."""
+    from modules import remote
     from modules.agents import key_of
     pager = [{"key": key_of(a), "sheet": f"agents/view/{a['handle']}", "title": a["title"],
               "project": a["project"], "summary": a["summary"]}
              for a in (STATE.get("agents") or {}).get("items", []) if a["status"] == "waiting"]
-    pager += remote.pager(cfg)
+    return pager + remote.pager(cfg)
+
+
+def live_payload(cfg, mods, screen=False):
+    """What /live returns: every card, the waiting agents (here and on remotes), kiosk notices, night mode,
+    every module's Home tiles and the grid built from them (`screen`: for the kiosk's own listener)."""
+    from modules import night, remote
+    pager = waiting(cfg)
     now, notices, ids = time.time(), [], set()
     for n in list(STATE.get("notices") or []) + remote.notices(cfg):
         if n["id"] not in ids and n["until"] > now:
             ids.add(n["id"])
             notices.append(n)
+    tabs = shown_tabs(cfg, mods)
+    tiles = {m.NAME: tiles_of(m, cfg, tabs) for m in mods}
     return {"cards": {m.NAME: render(m, cfg) for m in mods}, "waiting": len(pager), "pager": pager,
-            "notices": notices, "quiet": night.quiet(cfg)}
+            "notices": notices, "quiet": night.quiet(cfg), "tiles": tiles, "grid": grid_html(mods, tiles, pager, screen)}
+
+
+# --- Home tiles (the contract is in the docstring at the top) ---
+
+TINTS = ("on", "need", "busy", "ok", "warn", "bad")
+KIOSK_GRID = (5, 3)  # columns, rows: what fits the Switch's 1280 × 720 screen without scrolling
+# A target is "<module>/<name>[/<arg>]". The arg has no "/", "\" or "%": a browser reads "\" as "/" and "%2e%2e"
+# as "..", so either would climb out of the module (to this panel's own /action/power/sleep, say).
+_MOD, _ARG = r"[\w-]+(?:\.[\w-]+)*", r"[\w.:@-]*"
+TARGETS = {"sheet": re.compile(rf"{_MOD}/[\w-]+/{_ARG}", re.ASCII),
+           "action": re.compile(rf"{_MOD}/[\w-]+(?:/{_ARG})?", re.ASCII),
+           "page": re.compile(rf"{_MOD}/[\w-]+", re.ASCII)}
+
+
+def shown_tabs(cfg, mods):
+    """The tabs this panel renders (a tab with no module is hidden)."""
+    return [tab for tab, _, _ in TABS if any(tab_of(m, cfg) == tab for m in mods)]
+
+
+def clean_tile(t, name, tabs=None):
+    """Module `name`'s tile with every field checked (anything off is dropped or defaulted), or None without a key.
+    A sheet / action / page target must be the module's own ("<name>/…"; a remote's is "<rid>.<module>/…" once
+    prefixed); a tab must be one of `tabs` (default: every tab)."""
+    if not isinstance(t, dict) or not isinstance(t.get("key"), str) or not t["key"]:
+        return None
+    o, target = t.get("open"), None
+    if isinstance(o, dict):
+        if o.get("tab") in (tabs if tabs is not None else [tab for tab, _, _ in TABS]):
+            target = {"tab": o["tab"]}
+        for k, rx in TARGETS.items():
+            v = o.get(k)
+            if (target is None and isinstance(v, str) and rx.fullmatch(v) and v.startswith(f"{name}/")
+                    and ".." not in v and not v.endswith("/.")):
+                target = {k: v}
+                if k == "sheet":
+                    target["title"] = str(o.get("title") or "")[:120]
+                if k == "action" and isinstance(o.get("confirm"), str):
+                    target["confirm"] = o["confirm"][:200]
+    order, prog = t.get("order"), t.get("progress")
+    number = (int, float)
+    return {"key": t["key"][:80], "label": str(t.get("label") or "")[:60], "value": str(t.get("value") or "")[:80],
+            "tint": t.get("tint") if t.get("tint") in TINTS else None,
+            "icon": t.get("icon") if isinstance(t.get("icon"), str) and t["icon"] in ICONS else None,
+            "open": target, "span": 2 if t.get("span") == 2 else 1,
+            "order": order if isinstance(order, int) and not isinstance(order, bool) else 100,
+            "progress": max(0.0, min(1.0, float(prog))) if isinstance(prog, number) and not isinstance(prog, bool) else None,
+            "avatar_html": t["avatar_html"] if isinstance(t.get("avatar_html"), str) else None}
+
+
+def tiles_of(m, cfg, tabs=None):
+    """A module's Home tiles (its optional tiles(cfg)), cleaned (tabs: shown_tabs); [] when it has none or it fails."""
+    fn = getattr(m, "tiles", None)
+    if fn is None:
+        return []
+    try:
+        got = fn(cfg)
+    except Exception:  # one broken module shouldn't take the grid down
+        traceback.print_exc()
+        return []
+    return [c for c in (clean_tile(t, m.NAME, tabs) for t in (got if isinstance(got, list) else [])) if c]
+
+
+def kiosk_fit(spans, cols=KIOSK_GRID[0], rows=KIOSK_GRID[1]):
+    """Indexes of the tiles (their row spans, in order) that CSS grid's row-major auto-placement puts inside
+    cols × rows; a tile that would fall below is left out, and later smaller ones may still fit."""
+    taken, cursor, keep = set(), 0, []
+    for i, h in enumerate(spans):
+        pos = cursor
+        while pos < cols * rows:
+            r, c = divmod(pos, cols)
+            if r + h <= rows and not any((r + k, c) in taken for k in range(h)):
+                break
+            pos += 1
+        else:
+            continue
+        r, c = divmod(pos, cols)
+        taken.update((r + k, c) for k in range(h))
+        keep.append(i)
+        cursor = pos + 1
+    return keep
+
+
+def tile_html(name, t):
+    """One tile as a button; its tap uses the page's data-sheet / data-action / data-page machinery."""
+    esc = lambda s: html.escape(str(s), quote=True)  # noqa: E731
+    o = t["open"]
+    if o is None:
+        attrs = f' data-goto="{esc(name)}"'
+    elif "tab" in o:
+        attrs = f' data-tab="{esc(o["tab"])}"'
+    elif "sheet" in o:
+        attrs = f' data-sheet="{esc(o["sheet"])}" data-title="{esc(o["title"])}"'
+    elif "action" in o:
+        attrs = f' data-action="{esc(o["action"])}"' + (f' data-confirm="{esc(o["confirm"])}"' if "confirm" in o else "")
+    else:
+        attrs = f' data-page="{esc(o["page"])}"'
+    cls = ["ht"] + ([f'tint-{t["tint"]}'] if t["tint"] else []) + (["span2"] if t["span"] == 2 else [])
+    cls += (["ht-av"] if t["avatar_html"] is not None else []) + (["ht-agents"] if name.rsplit(".", 1)[-1] == "agents" else [])
+    if t["avatar_html"] is not None:
+        body = (f'<span class="ht-me" role="img" aria-label="Your avatar">{t["avatar_html"]}</span><b>{esc(t["label"])}</b>'
+                + (f'<span class="ht-xp"><i style="width:{t["progress"] * 100:.0f}%"></i></span>' if t["progress"] is not None else "")
+                + f'<small>{esc(t["value"])}</small>')
+    else:
+        body = (icon(t["icon"]) if t["icon"] else "") + f'<b>{esc(t["label"])}</b><small>{esc(t["value"])}</small>'
+    return f'<button class="{" ".join(cls)}" data-tile="{esc(name)}:{esc(t["key"])}"{attrs}>{body}</button>'
+
+
+def grid_html(mods, tiles, pager=(), screen=False):
+    """The Home grid: the clock (filled in by the page), then every module's tiles by order, ties in the config's
+    module order. The kiosk keeps what fits KIOSK_GRID (the rest is in the cards below). A phone shows the agents
+    waiting on you first, in a wide tile, instead of the Agents tile. Every child has a data-tile key ("clock",
+    "banner", "<module>:<key>"), which the page uses to replace only the tiles that changed."""
+    ranked = sorted(((t["order"], i, j, m.NAME, t) for i, m in enumerate(mods) for j, t in enumerate(tiles.get(m.NAME, []))),
+                    key=lambda x: x[:3])
+    if screen:
+        keep = set(kiosk_fit([1] + [x[4]["span"] for x in ranked]))
+        ranked = [x for k, x in enumerate(ranked, 1) if k in keep]
+    esc = lambda s: html.escape(str(s), quote=True)  # noqa: E731
+    out = []
+    if pager and not screen:
+        n, rows = len(pager), []
+        for a in pager[:4]:
+            who = f'{a.get("title", "")} · {a.get("project", "")}'
+            rows.append(f'<button class="ht-wait" data-sheet="{esc(a.get("sheet", ""))}" data-title="{esc("🔔 " + who)}">'
+                        f'<b>{esc(who)}</b><small>{esc(a.get("summary") or "")}</small></button>')
+        out.append(f'<div class="ht-banner" data-tile="banner"><div>{icon("terminal")}<span>{n} agent{"s" if n != 1 else ""} '
+                   f'need{"" if n != 1 else "s"} you</span></div>{"".join(rows)}</div>')
+    out.append('<div class="ht ht-clock" data-tile="clock"><b></b><small></small></div>')
+    out += [tile_html(name, t) for _, _, _, name, t in ranked]
+    return "".join(out)
 
 
 def face_sources(mods):
@@ -791,7 +1217,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             return self.send(200, "text/html", self.page(cfg, mods).encode())
         if path == "/live":
-            return self.reply(200, live_payload(cfg, mods))
+            return self.reply(200, live_payload(cfg, mods, self.screen))
         if path.startswith("/sheet/"):
             parts = path.split("/")[2:]  # sheet/<module>/<name>/<arg>
             fn = getattr(module(cfg, mods, parts[0]), "SHEETS", {}).get(parts[1]) if len(parts) == 3 else None
@@ -862,10 +1288,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def page(self, cfg, mods):
         panes = []
-        tabs = [t for t in TABS if any(tab_of(m, cfg) == t[0] for m in mods)]  # hide empty tabs
+        shown = shown_tabs(cfg, mods)
+        tabs = [t for t in TABS if t[0] in shown]  # hide empty tabs
         for tab, _, _ in tabs:
             secs = "".join(f'<section><h2>{html.escape(cfg.get("titles", {}).get(m.NAME, m.TITLE))}</h2><div id="m-{m.NAME}">{render(m, cfg)}</div></section>'
                            for m in mods if tab_of(m, cfg) == tab)
+            if tab == "home":  # the tile grid first; /live refreshes it
+                tiles = {m.NAME: tiles_of(m, cfg, shown) for m in mods}
+                secs = f'<div class="home-grid" id="home-grid">{grid_html(mods, tiles, waiting(cfg), self.screen)}</div>' + secs
             panes.append(f'<div class="pane" data-tab="{tab}">{secs}</div>')
         nav = "".join(f'<button data-tab="{t}"><svg viewBox="0 0 24 24"><path d="{d}"/></svg>{label}'
                       f'{"<span class=badge id=badge-agents hidden></span>" if t == "agents" else ""}</button>'

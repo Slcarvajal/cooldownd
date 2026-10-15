@@ -23,7 +23,8 @@ config "agenthealth" (every key optional): stuck_min, repeat, finish_after_s, fo
 tokens (false skips reading transcripts).
 
 FILES outbox/<since> (the Pi's pull) and party/now (running agents with a level per project and agent,
-1 + int(sqrt(tasks done))). SHEETS report/<YYYY-MM-DD> and ready/<task>. ACTIONS dismiss/<task|all>."""
+1 + int(sqrt(tasks done))). SHEETS report/<YYYY-MM-DD>, ready/<task|all> and view/<handle>. ACTIONS dismiss/<task|all>.
+tiles(): Stuck and Ready for the Home grid."""
 import hashlib
 import json
 import math
@@ -337,15 +338,16 @@ def card(cfg):
         if x["min"]:
             out.append(row(f'{x["title"]} · {x["project"]}', f'<small>{x["min"]} min</small>'))
     stuck = [a for a in items if a["status"] == "stuck"]
+    forgotten = [a for a in items if a.get("forgotten")]
+    lv = agents.levels() if stuck or forgotten else {}
     if stuck:
-        out.append(f"<h3>Stuck ({len(stuck)})</h3>" + "".join(agents.item_row(a) for a in stuck))
+        out.append(f"<h3>Stuck ({len(stuck)})</h3>" + "".join(agents.item_row(a, lv) for a in stuck))
     ready = agentlog.q("SELECT * FROM task WHERE dismissed IS NULL AND ts > ? ORDER BY ts DESC LIMIT 8",
                        (time.time() - 7 * 86400,))
     if ready:
         out.append(f"<h3>Ready to review ({len(ready)})</h3>" + "".join(_task_row(t) for t in ready))
-    forgotten = [a for a in items if a.get("forgotten")]
     if forgotten:
-        out.append(f"<h3>Forgotten ({len(forgotten)})</h3>" + "".join(agents.item_row(a) for a in forgotten))
+        out.append(f"<h3>Forgotten ({len(forgotten)})</h3>" + "".join(agents.item_row(a, lv) for a in forgotten))
     if c["tokens"]:
         out.append(_tokens_row(tokens.today()))
     out.append(f'<div class="foot"><button class="mini" data-sheet="agenthealth/report/{today}"><b>Daily report</b></button>'
@@ -354,7 +356,39 @@ def card(cfg):
     return "".join(out)
 
 
+def _ready(limit=8):
+    return agentlog.q("SELECT * FROM task WHERE dismissed IS NULL AND ts > ? ORDER BY ts DESC LIMIT ?",
+                      (time.time() - 7 * 86400, limit))
+
+
+def tiles(cfg):
+    """Home tiles (app.py): stuck agents (a tap opens the first) and finished work to review (a tap opens it,
+    or the list when there's more than one)."""
+    out = []
+    stuck = [a for a in (STATE.get("agents") or {}).get("items", []) if a["status"] == "stuck"]
+    if stuck:
+        a = stuck[0]
+        out.append({"key": "stuck", "label": "Stuck", "value": f"{len(stuck)} stuck", "tint": "bad", "icon": "alert",
+                    "open": {"sheet": f"agenthealth/view/{a['handle']}", "title": f"{a['title']} · {a['project']}"},
+                    "span": 1, "order": 15})
+    ready = _ready(100)
+    if ready:
+        one = len(ready) == 1
+        out.append({"key": "ready", "label": "Ready", "value": f"{len(ready)} to review", "tint": "ok", "icon": "ready",
+                    "open": {"sheet": f"agenthealth/ready/{ready[0]['id'] if one else 'all'}",
+                             "title": ready[0]["title"] if one else "Ready to review"},
+                    "span": 1, "order": 20})
+    return out
+
+
 def _ready_sheet(cfg, arg):
+    if arg == "all":  # the Ready tile's list
+        ready = _ready(100)
+        if not ready:
+            return '<p class="muted">Nothing to review.</p>'
+        return ("".join(_task_row(t) for t in ready)
+                + '<div class="foot"><span></span><button class="mini" data-action="agenthealth/dismiss/all" '
+                  'data-confirm="Mark every finished task as reviewed?">Dismiss all</button></div>')
     r = agentlog.q("SELECT * FROM task WHERE id = ?", (int(arg),))
     if not r:
         return '<p class="muted">That task is gone.</p>'
@@ -416,17 +450,32 @@ def outbox_file(cfg, arg):
     return "application/json", json.dumps(agentlog.outbox(int(arg))).encode()
 
 
+def _done():
+    """{(project, agent): tasks finished}."""
+    return {(r["project"], r["agent"]): r["n"]
+            for r in agentlog.q("SELECT project, agent, count(*) AS n FROM task GROUP BY project, agent")}
+
+
+def levels():
+    """{(project, agent): level} for the agents' creatures (agents.item_row); a pair not in it is level 1."""
+    return {k: level(n) for k, n in _done().items()}
+
+
 def party(now=None):
     """Running agents as party members: a level per (project, agent) from the tasks it finished."""
     s = STATE.get("agents") or {}
-    done = {(r["project"], r["agent"]): r["n"]
-            for r in agentlog.q("SELECT project, agent, count(*) AS n FROM task GROUP BY project, agent")}
+    done = _done()
     members = []
     for a in s.get("items", []):
         n = done.get((a["project"], a["agent"]), 0)
         members.append({"key": a["handle"], "title": a["title"], "project": a["project"], "agent": a["agent"],
                         "status": a["status"], "level": level(n), "done": n, "forgotten": bool(a.get("forgotten"))})
     return {"at": s.get("at") or (time.time() if now is None else now), "members": members}
+
+
+def view_sheet(cfg, handle):
+    """An agent's screen (agents.view), for the Stuck tile: a tile opens only its own module's sheets."""
+    return agents.view(cfg, handle)
 
 
 def party_file(cfg, arg):
@@ -436,5 +485,5 @@ def party_file(cfg, arg):
 
 
 ACTIONS = {"dismiss": dismiss}
-SHEETS = {"report": _report_sheet, "ready": _ready_sheet}
+SHEETS = {"report": _report_sheet, "ready": _ready_sheet, "view": view_sheet}
 FILES = {"outbox": outbox_file, "party": party_file}

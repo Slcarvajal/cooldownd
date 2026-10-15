@@ -11,6 +11,7 @@
     "pi.ha",
     "desk.agents",
     "desk.agenthealth",
+    "desk.presence",
     "power",
     "desk.machine",
     "tailnet"
@@ -77,6 +78,10 @@
     "desk.machine": {
       "title": "Hardware",
       "tab": "machine"
+    },
+    "desk.presence": {
+      "title": "Desk time",
+      "tab": "home"
     }
   }
 }

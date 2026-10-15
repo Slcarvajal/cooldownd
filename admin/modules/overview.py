@@ -1,4 +1,4 @@
-"""Home tab: the numbers that matter at a glance, and agents waiting on you."""
+"""Home tab: the numbers that matter at a glance, and agents waiting on you. tiles(): the Desktop tile."""
 from modules import agents, machine
 from modules.common import STATE, ago, e, level
 
@@ -10,6 +10,22 @@ def _tile(label, value, lvl="", sub="", tint=None):
     tint = tint if tint is not None else lvl if lvl in ("warn", "bad") else ""
     return (f'<div class="tile{f" tint-{tint}" if tint else ""}"><small>{e(label)}</small><b class="{lvl}">{e(value)}</b>'
             f'{f"<small>{e(sub)}</small>" if sub else ""}</div>')
+
+
+def tiles(cfg):
+    """Home tile (app.py): the desktop's wall power and CPU temperature; blue while it's awake, warn or bad when the
+    PSU load or the CPU is high. A tap opens the Machine tab. Agents have their own tile (modules/agents.py)."""
+    m = STATE.get("machine")
+    if not m:
+        return []
+    cpu_t = (m.get("temps") or {}).get("cpu")
+    w, c = machine.PSU_LOAD_LIMITS
+    load = m.get("psu_load", 0)
+    lvls = ("bad" if load >= c else "warn" if load >= w else "ok", level(cpu_t, *machine.LIMITS["cpu"]))
+    tint = "bad" if "bad" in lvls else "warn" if "warn" in lvls else "busy"
+    value = f"{m.get('wall', 0):.0f} W" + (f" · {cpu_t:.0f}°" if cpu_t is not None else "")
+    return [{"key": "desktop", "label": "Desktop", "value": value, "tint": tint, "icon": "monitor",
+             "open": {"tab": "machine"}, "span": 1, "order": 70}]
 
 
 def card(cfg):
@@ -38,10 +54,11 @@ def card(cfg):
     waiting = [x for x in items if x["status"] == "waiting"]
     working = [x for x in items if x["status"] in ("working", "stuck")]  # a stuck agent is still on it
     lists = []  # side by side on a landscape screen
+    lv = agents.levels() if waiting or working else {}
     if waiting:
-        lists.append(f"<div><h3>Needs you ({len(waiting)})</h3>" + "".join(agents.item_row(x) for x in waiting) + "</div>")
+        lists.append(f"<div><h3>Needs you ({len(waiting)})</h3>" + "".join(agents.item_row(x, lv) for x in waiting) + "</div>")
     if working:
-        lists.append(f"<div><h3>Working now ({len(working)})</h3>" + "".join(agents.item_row(x) for x in working) + "</div>")
+        lists.append(f"<div><h3>Working now ({len(working)})</h3>" + "".join(agents.item_row(x, lv) for x in working) + "</div>")
     if lists:
         out.append(f'<div class="lists">{"".join(lists)}</div>')
     elif items:

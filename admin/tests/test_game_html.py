@@ -5,7 +5,8 @@ import re
 import unittest
 
 PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "life", "game.html")
-SAFE_CALL = re.compile(r"(esc|num|pct)\(")
+# critter() (app.KIOSK_JS) builds its SVG from numbers and fixed colours only, never from its arguments' text.
+SAFE_CALL = re.compile(r"(esc|num|pct|critter)\(")
 # A ternary whose branches are both string literals: `${q.done ? ' done' : ''}`
 LITERAL_TERNARY = re.compile(r"^[\w.\[\]!= ]+\?\s*'[^'$`]*'\s*:\s*'[^'$`]*'$")
 # What an innerHTML assignment may start with: a template, a mapped list, or fill()'s already built html.

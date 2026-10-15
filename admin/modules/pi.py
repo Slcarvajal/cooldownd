@@ -1,5 +1,6 @@
 """Raspberry Pi health at a glance: temperature, throttling, load, memory, disk, uptime,
-plus a 3-minute temperature graph, fan, swap, supply voltage and the NVMe drive once there is one."""
+plus a 3-minute temperature graph, fan, swap, supply voltage and the NVMe drive once there is one.
+tiles(): the Pi tile (temperature) on the Home grid."""
 import glob
 import os
 import shutil
@@ -54,6 +55,17 @@ def _tile(label, value, lvl="", sub=""):
     tint = f" tint-{lvl}" if lvl in ("warn", "bad") else ""
     return (f'<div class="tile{tint}"><small>{e(label)}</small><b class="{lvl}">{e(value)}</b>'
             f'{f"<small>{e(sub)}</small>" if sub else ""}</div>')
+
+
+def tiles(cfg):
+    """Home tile (app.py): the Pi's temperature; grey when fine, warn or bad when it runs hot. Throttling and the
+    rest stay on the card (vcgencmd isn't run twice a refresh)."""
+    temp = _temp()
+    if temp is None:
+        return []
+    lvl = level(temp, *LIMITS["temp"])
+    return [{"key": "pi", "label": "Pi", "value": f"{temp:.0f}° · " + {"ok": "all good", "warn": "warm"}.get(lvl, "hot"),
+             "tint": lvl if lvl in ("warn", "bad") else None, "icon": "chip", "open": None, "span": 1, "order": 90}]
 
 
 def card(cfg):

@@ -2,9 +2,11 @@
 
 Talks to Home Assistant's REST API with a long-lived token kept outside the repo
 (config "ha.token_file", mode 600). "ha.exclude" hides entity ids.
+tiles(): the alarm, lights and switches for the Home grid (a switch asks first; a light is one tap).
 """
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +20,10 @@ ALARM_OPS = {"arm_away": "Arm (away)", "arm_home": "Arm (home)", "arm_night": "A
 ALARM_LEVEL = {"disarmed": "dim", "triggered": "bad", "pending": "warn", "arming": "warn"}  # armed_* -> ok
 DOWN = ("unavailable", "unknown")
 TILES = {"light": "bulb", "switch": "power", "siren": "siren"}  # domains shown as tiles, and their icon
+FRESH = 2  # seconds one states read serves the card, the tiles and every client's poll (as remote.FRESH)
+
+_fresh = {}  # config "ha" as JSON -> (read at, states list or the error it raised)
+_lock = threading.Lock()
 
 
 def _conf(cfg):
@@ -46,9 +52,21 @@ def _api(cfg, path, body=None, timeout=5):
 
 
 def _states(cfg):
-    raw, _ = _api(cfg, "states")
+    """Every entity's state but "ha.exclude", read once per FRESH however many callers ask. A failed read is
+    kept too, so an unreachable Home Assistant costs one timeout per poll, not one per caller."""
+    key = json.dumps(_conf(cfg), sort_keys=True, default=str)
+    with _lock:
+        hit = _fresh.get(key)
+        if hit is None or time.monotonic() - hit[0] >= FRESH:
+            try:
+                hit = (time.monotonic(), json.loads(_api(cfg, "states")[0]))
+            except (OSError, ValueError) as ex:  # URLError and timeouts are OSErrors
+                hit = (time.monotonic(), ex)
+            _fresh[key] = hit
+    if isinstance(hit[1], Exception):
+        raise hit[1]
     skip = set(_conf(cfg).get("exclude", []))
-    return [s for s in json.loads(raw) if s["entity_id"] not in skip]
+    return [s for s in hit[1] if s["entity_id"] not in skip]
 
 
 def _name(s):
@@ -89,6 +107,35 @@ def _tile(s):
             f'{icon(TILES[dom])}<b>{name}</b><small>{"On" if on else "Off"}</small></button>')
 
 
+def tiles(cfg):
+    """Home tiles (app.py): the alarm (its state; arming stays on the card), and each light and switch, which a
+    tap toggles (a switch can run anything, so it asks first). Nothing without a token or while Home Assistant
+    is unreachable: the card says why."""
+    if not _token(cfg):
+        return []
+    try:
+        states = _states(cfg)
+    except (OSError, urllib.error.URLError, ValueError):
+        return []
+    out = []
+    for s in sorted(states, key=_name):
+        eid, state, dom = s["entity_id"], s["state"], s["entity_id"].split(".")[0]
+        if dom == "alarm_control_panel":
+            value = "Offline" if state in DOWN else "Off" if state == "disarmed" else state.replace("_", " ").capitalize()
+            tint = None if state in DOWN or state == "disarmed" else ALARM_LEVEL.get(state, "ok")  # armed: ok
+            out.append({"key": eid, "label": "Alarm", "value": value, "tint": tint, "icon": "shield", "open": None,
+                        "span": 1, "order": 40})
+        elif dom in ("light", "switch"):
+            on = state == "on"
+            open_ = None if state in DOWN else {"action": f"ha/toggle/{eid}"}
+            if open_ and dom == "switch":
+                open_["confirm"] = f'Turn {"off" if on else "on"} {_name(s)}?'
+            out.append({"key": eid, "label": _name(s), "value": "Offline" if state in DOWN else "On" if on else "Off",
+                        "tint": "on" if on else None, "icon": TILES[dom], "open": open_,
+                        "span": 1, "order": 30 if dom == "light" else 45})
+    return out
+
+
 def card(cfg):
     if not _token(cfg):
         return ('<p class="muted">Home Assistant isn\'t connected yet. In Home Assistant: your profile → '
@@ -115,6 +162,8 @@ def _call(service, verb):
         if dom not in {d for d, _ in GROUPS}:
             raise ValueError(f"{eid} isn't controllable from here")
         _api(cfg, f"services/{dom}/{service}", {"entity_id": eid}, timeout=15)
+        with _lock:
+            _fresh.clear()  # the next poll shows the change
         print(f"ha.{service} {eid}", flush=True)
         return f"{verb} {eid.split('.', 1)[1].replace('_', ' ')}."
     return act

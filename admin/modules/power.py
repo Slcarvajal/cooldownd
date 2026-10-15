@@ -1,4 +1,5 @@
-"""Sleep this machine (or, through its remote panel, another one); wake the others with Wake-on-LAN."""
+"""Sleep this machine (or, through its remote panel, another one); wake the others with Wake-on-LAN.
+tiles(): a Wake tile on the Home grid for each other machine while it's asleep."""
 import socket
 import subprocess
 import threading
@@ -55,6 +56,20 @@ def card(cfg):
             f'{pill(online, "awake" if online else "asleep / off")}</div>{btn}{link}</div>'
         )
     return "".join(out)
+
+
+def tiles(cfg):
+    """Home tiles (app.py): each other machine while it's asleep, which a tap wakes. Awake, the desktop has its
+    own tile (modules/overview.py), and sleeping it stays on the card, behind its confirmation."""
+    me, out = self_host(), []
+    if not me:  # no tailnet status: who's asleep is unknown (this could even be the machine itself)
+        return []
+    for m in cfg.get("machines", []):
+        if m["tailnet"].lower() == me or (peer(m["tailnet"]) or {}).get("Online", False):
+            continue
+        out.append({"key": f"wake-{m['id']}", "label": m["name"].split(" · ")[0], "value": "Asleep · tap to wake",
+                    "tint": None, "icon": "power", "open": {"action": f"power/wake/{m['id']}"}, "span": 1, "order": 70})
+    return out
 
 
 def _sleep_soon():

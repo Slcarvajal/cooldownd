@@ -34,7 +34,7 @@ The workstation keeps a log of what its agents do, so you see more than who's wa
 - **A daily report** with all of the above.
 
 <p align="center">
-  <img src="docs/agents-phone.png" width="300" alt="The Agents tab on a phone: agents grouped by machine and project, with needs you, at PC, working, stuck and idle counts">
+  <img src="docs/agents-phone.png" width="300" alt="The Agents tab on a phone: each agent with its pixel critter in a ring of its status colour, grouped by machine and project">
   &nbsp;
   <img src="docs/agent-sheet-phone.png" width="300" alt="One agent open on a phone: answer tiles above its terminal and a reply box">
 </p>
@@ -59,7 +59,7 @@ The Life RPG turns looking after yourself into XP:
 - **HP, Energy and Stamina:** HP from your sleep, Energy from today's meals and protein, Stamina from this week's training. Your avatar's mood follows them. Sleep debt shows once you log nights (by hand for now; a Fitbit import is wanted).
 - **Levels, skill trees, weekly quests and streaks**, plus a **weekly boss** that every finished quest hits; beat it by Sunday for bonus XP.
 - **Achievements, titles and gear** (hats, capes, auras) unlocked as you go.
-- **Your agents join your party** on the game screen, each with a level from the tasks it finished.
+- **Your agents are little creatures.** Each agent gets its own pixel critter, generated from its project and kind (the same agent always looks the same), that evolves as it finishes tasks: horns or antennae at level 3, a crown or wings at 6. They act out their status: bobbing while working, hopping with a "!" when they need you, smoking when stuck, snoozing when idle. They stand next to your avatar in the game, on the Switch's faces and in the agents list.
 - **Co-op:** share a weekly quest board with friends who run cooldownd, over Tailscale (off until you set it up, below).
 - Everything is computed from stored events, so changing a rule rescores your whole history.
 - **Your avatar.** Draw or generate your own sprite sheets; with them, it wears what you did today (gym clothes after the gym, the jersey after a match). Without them, a drawn pixel avatar stands in.
@@ -67,14 +67,16 @@ The Life RPG turns looking after yourself into XP:
 
 <p align="center"><img src="docs/face-body.png" width="720" alt="The Switch's body face: the avatar, level and XP, HP, Energy and Stamina rings, the weekly boss and this week's quests"></p>
 <p align="center"><img src="docs/game.png" width="720" alt="The Life RPG on a TV: avatar, bars and gear, the weekly boss, skill trees including Balance, achievements, quests, today's standup and recent XP"></p>
-<p align="center"><img src="docs/panel-phone.png" width="300" alt="The panel on a phone: the Life card with the avatar, mood, HP, Energy and Stamina, sleep debt and quests"></p>
+<p align="center"><img src="docs/panel-phone.png" width="300" alt="Home on a phone: the avatar tile, an orange tile listing the agents that need you, then Ready, Desk time, Gym and Meal tiles"></p>
 
 ## Your machines
 
 - **One codebase, many panels.** Each machine runs `admin/app.py` (Python standard library only; phone alerts also need `python3-cryptography`) with its own config. A panel can show any other panel's cards (`"desk.agents"` is the workstation's agents card, shown on the Pi), and taps, sheets and actions are forwarded to the panel that owns them.
 - **Your PCs.** CPU, GPU, temperatures, wall power against the PSU, services you can restart, a fixed list of commands (never a free shell), Wake-on-LAN from the always-on Pi, and Sleep.
 - **The Pi.** Temperature graph, throttling and under-voltage flags, fan, 5 V supply, NVMe, a Docker stack with Home Assistant (lights, alarm, cameras), and uptime checks for your servers with phone alerts when one goes down.
-- **A Nintendo Switch as the house touchscreen.** Switchroot Ubuntu in kiosk mode on a USB-C stand: the agent pager and your home, as tinted tiles. After a minute untouched it shows an ambient face you can read from across the room: the agents face (a big clock ringed by your agents' status) or the body face; tap the date to switch. Docked to a TV, it shows the game instead.
+- **A Nintendo Switch as the house touchscreen.** Switchroot Ubuntu in kiosk mode on a USB-C stand: the agent pager and your home as a grid of tinted tiles (agents, ready to review, lights, alarm, desk time, your avatar, quests, meals, PCs) that each open their details. After a minute untouched it shows an ambient face you can read from across the room: the agents face (a big clock ringed by your agents' status) or the body face; tap the date to switch. Docked to a TV, it shows the game instead.
+
+<p align="center"><img src="docs/home-switch.png" width="720" alt="Home on the Switch: a grid of rounded tiles: the clock, Agents (2 need you) in orange, Ready (3 to review) in green, the avatar, Desk time, Gym and Meal"></p>
 
 ## How it fits together
 
@@ -174,7 +176,7 @@ A Life RPG with running and swimming:
 
 ## Modules
 
-Each card is a file in `admin/modules/` that provides `NAME`, `TITLE`, `TAB` and `card(cfg)`, plus any of `ACTIONS`, `SHEETS` (bottom sheets), `FILES` (images, JSON), `PAGES` (full-screen pages), `UPLOADS` and a background `sample(cfg)`. The contract is at the top of `admin/app.py`.
+Each card is a file in `admin/modules/` that provides `NAME`, `TITLE`, `TAB` and `card(cfg)`, plus any of `ACTIONS`, `SHEETS` (bottom sheets), `FILES` (images, JSON), `PAGES` (full-screen pages), `UPLOADS`, a background `sample(cfg)` and `tiles(cfg)` (its tiles on the Home grid: label, value, tint, icon and what a tap opens). The contract is at the top of `admin/app.py`.
 
 | Module | Card |
 |---|---|
@@ -201,6 +203,7 @@ Read this before you run it.
 - **The panel controls your machines.** It types into your agents, restarts services, runs its commands and sleeps PCs. It's only as safe as who can reach it.
 - **Tailnet only.** Publish it with `tailscale serve`, **never `tailscale funnel`**. Every request must carry a `Tailscale-User-Login` in `allowed_users`, or the shared hub token. Anyone on your tailnet whose login isn't listed gets a 403.
 - **Every local process is trusted.** The panel listens on `127.0.0.1` and trusts the login header `tailscale serve` adds, so any program or user on the same machine can send that header too, including containers with host networking (Home Assistant on the Pi). Run panels on machines whose local users and software you trust.
+- **Panels you add as remotes are trusted like the panel itself.** Their cards and Home tiles (including the avatar) arrive as HTML and are shown as is, and taps are forwarded back to them. Tile targets are checked so a tap can only reach the module that made the tile, but only add panels you run.
 - **The hub token is full control.** Any panel holding it can run every action on every panel. It sits on the kiosk, which logs in by itself; if you lose the device, make a new token (`python3 -c "import secrets; print(secrets.token_hex(16))"`), put it in `~/.config/homelab-admin/hub-token` on every panel you keep, and remove the lost device from your tailnet.
 - **Only known host names are answered** (loopback, `*.ts.net`, config `hosts`), so a web page can't reach a panel through DNS rebinding.
 - **The kiosk's screen port has no login, on purpose.** `SCREEN_PORT` listens on `127.0.0.1` only, for the touchscreen itself, so whoever stands at the Switch has full control. Keep that in mind for guests.

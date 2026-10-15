@@ -66,9 +66,11 @@ letter-spacing:.1em;opacity:0;pointer-events:none;transition:opacity .4s;text-al
 .bars{display:grid;gap:.35rem;margin-top:.9rem;text-align:left}
 .vital{display:grid;grid-template-columns:4.8rem 1fr 2.6rem;gap:.5rem;align-items:center;font-size:.8rem}
 .vital .xp{margin:0;height:.65rem}.vital span:last-child{text-align:right}
-.party{display:grid;gap:.4rem;text-align:left}
-.member{display:grid;grid-template-columns:1.6rem 1fr auto;gap:.5rem;align-items:center;background:var(--panel2);padding:.4rem .6rem;border-radius:4px;font-size:.8rem}
-.member b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.member.forgotten{opacity:.55}
+.party{display:flex;flex-wrap:wrap;justify-content:center;gap:.6rem .3rem;margin:.6rem auto 0;max-width:520px}
+.member{flex:0 0 calc((100% - 1.2rem) / 5);min-width:0;display:grid;justify-items:center;gap:.1rem;font-size:.7rem;line-height:1.25}
+.member i{display:block;width:min(96px,100%);aspect-ratio:1;background:radial-gradient(ellipse 40% 8% at 50% 92%,rgba(0,0,0,.45),transparent)}
+.member b,.member small{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member.forgotten{opacity:.55}.member.forgotten i{filter:grayscale(1)}
 .gear{display:grid;gap:.5rem;text-align:left}
 .slot{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;font-size:.75rem}
 .slot>span{width:3.4rem;color:var(--mute);text-transform:uppercase;letter-spacing:.1em}
@@ -85,11 +87,11 @@ letter-spacing:.1em;opacity:0;pointer-events:none;transition:opacity .4s;text-al
 </style></head><body>
 <a class="back" id="back" href="/">← Control center</a>
 <main>
-  <section class="hero"><div id="avatar"><i></i><span id="drawn"></span><b id="mood"></b></div><h1 id="name"></h1><div id="banner"></div><div id="lvl">Loading…</div>
+  <section class="hero"><div id="avatar"><i></i><span id="drawn"></span><b id="mood"></b></div>
+    <div id="party-box" hidden><div class="party" id="party" role="list" aria-label="Your agents"></div></div><h1 id="name"></h1><div id="banner"></div><div id="lvl">Loading…</div>
     <div class="xp"><i id="xpbar" style="width:0"></i></div><small id="xp"></small>
     <div class="bars" id="bars"></div>
     <div class="streaks" id="streaks"></div>
-    <div id="party-box" hidden><h2>Party</h2><div class="party" id="party"></div></div>
     <div id="gear-box" hidden><h2>Gear</h2><div class="gear" id="gear"></div></div></section>
   <section><div id="boss-box" hidden><h2>This week's boss</h2><div id="boss"></div></div>
     <h2>Skill trees</h2><div id="skills"></div>
@@ -118,7 +120,7 @@ const obj = v => v && typeof v === 'object' && !Array.isArray(v) ? v : null;
 // Shows a block (its h2 included) only when it has something to draw.
 function fill(box, sel, html) { $(box).hidden = !html; $(sel).innerHTML = html || '' }
 const MOODS = {great: '😄', happy: '😄', good: '🙂', ok: '🙂', meh: '😐', tired: '😴', sleepy: '😴', sore: '🥵', hungry: '🍽️', sad: '😞', low: '😞'};
-const STATUS = {working: '⚙️', waiting: '❗', atpc: '🖥️', stuck: '⚠️', idle: '💤'};
+const STATUS = {working: 'working', waiting: 'needs you', atpc: 'at PC', stuck: 'stuck', idle: 'idle'};
 const hm = m => { m = Math.round(num(m)); return m >= 60 ? Math.floor(m / 60) + ' h ' + m % 60 + ' m' : m + ' m' };
 
 function draw(S) {
@@ -129,8 +131,7 @@ function draw(S) {
   $('#xp').textContent = `${S.into} / ${S.span} XP · ${S.xp} total`;
   look(S); vitals(S);
   $('#streaks').innerHTML = arr(S.streaks).map(s => `<div class="streak"><span>${esc(s.name)}</span><b>${esc(s.n ? '🔥 ' + num(s.n) : '—')}</b></div>`).join('') + sleep(obj(S.sleep));
-  fill('#party-box', '#party', arr(S.party).map(m => `<div class="member${m.forgotten ? ' forgotten' : ''}"><span>${esc(STATUS[m.status] || '•')}</span>
-    <span><b>${esc(m.title || m.key)}</b><small>${esc([m.project, m.agent].filter(Boolean).join(' · '))}</small></span><small>Lv ${num(m.level)}</small></div>`).join(''));
+  party(arr(S.party).filter(obj));
   gear(S);
   boss(obj(S.boss));
   $('#skills').innerHTML = arr(S.skills).map(k => `<div class="skill" style="--c:${esc(k.color)}">
@@ -158,6 +159,15 @@ function draw(S) {
     const l = $('#levelup'); l.innerHTML = `LEVEL UP<br>${num(S.level)} · ${esc(S.title)}`; l.classList.add('show'); setTimeout(() => l.classList.remove('show'), 4000);
   }
   lastLevel = S.level;
+}
+// The desk's agents as creatures (KIOSK_JS critter) standing under the avatar: name, level and status; forgotten
+// ones greyed. Redrawn only when something changed, so their animations don't restart on every poll.
+let partyShown = '';
+function party(list) {
+  const html = list.map(m => `<div class="member${m.forgotten ? ' forgotten' : ''}" role="listitem" title="${esc([m.project, m.agent].filter(Boolean).join(' · '))}">
+    <i>${critter(crSeed(m), m.status, m.level, m.agent)}</i><b>${esc(m.title || m.key || '')}</b><small>${esc('Lv ' + num(m.level) + ' · ' + (STATUS[m.status] || 'idle'))}</small></div>`).join('');
+  if (html === partyShown) return;
+  partyShown = html; fill('#party-box', '#party', html);
 }
 // Mood emote and the cosmetics that also work over sprite strips: the aura and the title banner.
 function look(S) {
@@ -288,6 +298,7 @@ if (KIOSK) {
       const d = await (await fetch('/live', {cache: 'no-store'})).json(), keys = (d.pager || []).map(a => a.key);
       const fresh = seen && (d.pager || []).find(a => !seen.includes(a.key));
       seen = keys;
+      document.documentElement.classList.toggle('cr-still', !!d.quiet);  // night: the creatures stand still
       if (fresh && !d.quiet) location.href = '/?stay=1#' + new URLSearchParams({sheet: fresh.sheet, title: '🔔 ' + fresh.title + ' · ' + fresh.project});
     } catch (e) {}
   }, 5000);

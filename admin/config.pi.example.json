@@ -14,6 +14,7 @@
     "uptime",
     "desk.agents",
     "desk.agenthealth",
+    "desk.presence",
     "desk.machine",
     "services",
     "notify",
@@ -142,6 +143,10 @@
     "desk.machine": {
       "title": "Workstation hardware",
       "tab": "machine"
+    },
+    "desk.presence": {
+      "title": "Desk time",
+      "tab": "home"
     }
   },
   "ha": {

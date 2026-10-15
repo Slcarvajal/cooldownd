@@ -20,7 +20,8 @@ The sit and nudge reminders are also notices for the kiosk: STATE["notices"] = [
 such as "desk:nudge:<window start>" that stay the same when the Switch reads them through the Pi. /live
 carries them (app.py), and a break clears them.
 
-config "presence" (every key optional): sit_min, break_min, active_idle_s, busy_after_min, busy_min_working."""
+config "presence" (every key optional): sit_min, break_min, active_idle_s, busy_after_min, busy_min_working.
+tiles(): Desk time and Move for the Home grid."""
 import time
 from datetime import datetime
 
@@ -164,6 +165,30 @@ def _breaks_today():
         return len(agentlog.q("SELECT id FROM outbox WHERE kind = 'break' AND ts >= ?", (start,)))
     except Exception:
         return None
+
+
+def tiles(cfg):
+    """Home tiles (app.py): Desk time (warn from 80 % of sit_min, bad from sit_min), and Move while an
+    "Agents busy" window is open."""
+    c, s = settings(cfg), STATE.get("presence")
+    if not s or s.get("idle_s") is None:
+        return []
+    mins = s["active_min"]
+    if s["span_start"] is None:
+        value, tint = "Away", None
+    elif mins >= c["sit_min"]:
+        value, tint = f"{mins} min · stand up", "bad"
+    elif mins >= c["sit_min"] * 0.8:
+        value, tint = f"{mins} min · stand up soon", "warn"
+    else:
+        value, tint = f"{mins} min", None
+    out = [{"key": "desk", "label": "Desk time", "value": value, "tint": tint, "icon": "timer", "open": None,
+            "span": 1, "order": 60}]
+    if s["window"] is not None:
+        busy = int((s["at"] - s["window"]) // 60)
+        out.append({"key": "move", "label": "Move", "value": f"Agents busy {busy} min" + (" · take a break" if s["nudged"] else ""),
+                    "tint": "busy", "icon": "walk", "open": None, "span": 1, "order": 110})
+    return out
 
 
 def card(cfg):

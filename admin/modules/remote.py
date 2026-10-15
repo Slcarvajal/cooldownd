@@ -5,7 +5,9 @@ config.json:
   "remote_modules": {"desk.agents": {"title": "Agents", "tab": "agents"}, ...}
 and list "desk.agents" in "modules". The card is the remote's own HTML with its
 data-action / data-sheet / data-post targets (and file/ image URLs) prefixed "desk.",
-so clicks come back here and are forwarded (data-photo and data-page too). Its waiting agents join this panel's pager,
+so clicks come back here and are forwarded (data-photo and data-page too). Its Home tiles
+(/live "tiles", see app.py) come the same way: their sheet / action / page targets and the
+avatar's file/ URL are prefixed. Its waiting agents join this panel's pager,
 and its kiosk notices (/live "notices") join this panel's, deduplicated by their global id.
 `tailscale serve` on the remote adds the login header for this machine's owner, so the
 remote's allowed_users check still applies; a tagged machine with no owner (the Switch)
@@ -24,7 +26,7 @@ TIMEOUT = 4
 ACTION_TIMEOUT = 60  # an agent send takes up to 30 s; a slow action on a remote, more
 FRESH = 2.5  # seconds a remote /live result is reused across cards and clients
 
-_live = {}  # remote id -> (fetched_at, cards dict or None, pager list, notices list)
+_live = {}  # remote id -> (fetched_at, cards dict or None, pager list, notices list, tiles dict)
 _locks = {}
 _HOOKS = re.compile(r'(data-(?:action|sheet|post|photo|page)="|src="file/)')
 
@@ -73,9 +75,10 @@ def live(cfg, rid):
             notes = [{"id": n["id"], "text": n["text"], "until": float(n["until"])} for n in d.get("notices") or []
                      if isinstance(n, dict) and isinstance(n.get("id"), str) and isinstance(n.get("text"), str)
                      and isinstance(n.get("until"), (int, float))]
+            tiles = d.get("tiles") if isinstance(d.get("tiles"), dict) else {}  # an older panel sends none
         except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
-            cards, pager, notes = None, [], []
-        _live[rid] = (time.monotonic(), cards, pager, notes)
+            cards, pager, notes, tiles = None, [], [], {}
+        _live[rid] = (time.monotonic(), cards, pager, notes, tiles)
         return cards, pager
 
 
@@ -96,7 +99,7 @@ def notices(cfg):
         if rid not in used:
             continue
         live(cfg, rid)
-        for n in (_live.get(rid) or (0, None, [], []))[3]:
+        for n in (_live.get(rid) or (0, None, [], [], {}))[3]:
             if n["id"] not in seen:
                 seen.add(n["id"])
                 out.append(n)
@@ -105,6 +108,15 @@ def notices(cfg):
 
 def _prefix(rid, html):
     return _HOOKS.sub(lambda m: f'{m.group(1)}{rid}.', html)
+
+
+def _prefix_open(rid, module, target):
+    """A tile's tap target re-addressed to the remote, like _prefix does for card HTML; a tab stays local.
+    A sheet / action / page of another module than the tile's own is dropped (app.clean_tile checks the rest)."""
+    if not isinstance(target, dict):
+        return None
+    return {k: f"{rid}.{v}" if k in ("sheet", "action", "page") else v for k, v in target.items()
+            if k not in ("sheet", "action", "page") or (isinstance(v, str) and v.startswith(f"{module}/"))}
 
 
 def _offline(cfg, rid):
@@ -169,3 +181,16 @@ class Remote:
         if cards is None:
             return _offline(cfg, self.rid)
         return _prefix(self.rid, cards.get(self.module, '<p class="muted">Not on that panel.</p>'))
+
+    def tiles(self, cfg):
+        """The remote module's Home tiles, from the same /live fetch as the card. [] while it's unreachable."""
+        live(cfg, self.rid)
+        got = (_live.get(self.rid) or (0, None, [], [], {}))[4].get(self.module)
+        out = []
+        for t in got if isinstance(got, list) else []:
+            if isinstance(t, dict):
+                t = {**t, "open": _prefix_open(self.rid, self.module, t.get("open"))}
+                if isinstance(t.get("avatar_html"), str):
+                    t["avatar_html"] = _prefix(self.rid, t["avatar_html"])
+                out.append(t)
+        return out
