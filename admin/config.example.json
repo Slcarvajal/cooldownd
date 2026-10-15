@@ -1,0 +1,91 @@
+{
+  "title": "Control center",
+  "name": "Alex",
+  "allowed_users": [
+    "you@example.com"
+  ],
+  "modules": [
+    "overview",
+    "agents",
+    "power",
+    "machine",
+    "services",
+    "tailnet",
+    "commands"
+  ],
+  "psu_watts": 650,
+  "machines": [
+    {
+      "id": "pc",
+      "name": "Workstation",
+      "tailnet": "workstation",
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "broadcast": "192.168.1.255",
+      "wake_from": "https://pi.your-tailnet.ts.net:8443/"
+    }
+  ],
+  "services": [
+    {
+      "unit": "homelab-admin.service",
+      "user": true,
+      "label": "Control center"
+    },
+    {
+      "unit": "ollama.service",
+      "user": false,
+      "control": true,
+      "label": "Local model server"
+    }
+  ],
+  "homelab_devices": [
+    "workstation",
+    "pi",
+    "switch",
+    "phone"
+  ],
+  "commands": [
+    {
+      "id": "tailscale",
+      "label": "Tailscale status",
+      "about": "Devices on the tailnet and how they connect",
+      "cmd": [
+        "tailscale",
+        "status"
+      ]
+    },
+    {
+      "id": "disk",
+      "label": "Disk space",
+      "about": "Free space on each drive",
+      "cmd": [
+        "df",
+        "-h",
+        "-x",
+        "tmpfs",
+        "-x",
+        "devtmpfs"
+      ]
+    },
+    {
+      "id": "failed",
+      "label": "Failed services",
+      "about": "System and user units that crashed",
+      "cmd": "systemctl --failed --no-pager; echo; systemctl --user --failed --no-pager"
+    },
+    {
+      "id": "restart-panel",
+      "label": "Restart this panel",
+      "about": "Reloads the panel after code changes (back in ~3 s)",
+      "cmd": [
+        "systemd-run",
+        "--user",
+        "--on-active=2",
+        "systemctl",
+        "--user",
+        "restart",
+        "homelab-admin.service"
+      ],
+      "confirm": true
+    }
+  ]
+}

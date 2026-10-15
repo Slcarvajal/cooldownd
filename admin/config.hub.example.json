@@ -1,0 +1,73 @@
+{
+  "title": "Control center",
+  "name": "Alex",
+  "allowed_users": [
+    "you@example.com"
+  ],
+  "modules": [
+    "pi.life",
+    "desk.overview",
+    "pi.pi",
+    "pi.ha",
+    "desk.agents",
+    "power",
+    "desk.machine",
+    "tailnet"
+  ],
+  "tabs": {
+    "power": "home"
+  },
+  "game": "/page/pi.life/game",
+  "machines": [
+    {
+      "id": "pc",
+      "name": "Workstation",
+      "tailnet": "workstation",
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "broadcast": "192.168.1.255",
+      "remote": "desk"
+    }
+  ],
+  "homelab_devices": [
+    "switch",
+    "workstation",
+    "pi",
+    "phone"
+  ],
+  "remotes": {
+    "desk": {
+      "url": "https://workstation.your-tailnet.ts.net:8443",
+      "name": "The workstation"
+    },
+    "pi": {
+      "url": "https://pi.your-tailnet.ts.net:8443",
+      "name": "The Pi"
+    }
+  },
+  "remote_modules": {
+    "pi.life": {
+      "title": "Life",
+      "tab": "home"
+    },
+    "desk.overview": {
+      "title": "At a glance",
+      "tab": "home"
+    },
+    "pi.pi": {
+      "title": "Raspberry Pi",
+      "tab": "home"
+    },
+    "pi.ha": {
+      "title": "Home",
+      "tab": "home"
+    },
+    "desk.agents": {
+      "title": "Agents",
+      "tab": "agents"
+    },
+    "desk.machine": {
+      "title": "Hardware",
+      "tab": "machine"
+    }
+  }
+}

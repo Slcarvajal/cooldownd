@@ -1,0 +1,193 @@
+{
+  "title": "Control center",
+  "name": "Alex",
+  "allowed_users": [
+    "you@example.com"
+  ],
+  "modules": [
+    "life",
+    "ha",
+    "power",
+    "desk.overview",
+    "pi",
+    "uptime",
+    "desk.agents",
+    "desk.machine",
+    "services",
+    "notify",
+    "tailnet",
+    "commands"
+  ],
+  "tabs": {
+    "power": "home"
+  },
+  "titles": {
+    "ha": "Home",
+    "power": "PCs",
+    "pi": "Raspberry Pi",
+    "uptime": "Servers"
+  },
+  "machines": [
+    {
+      "id": "pc",
+      "name": "Workstation",
+      "tailnet": "workstation",
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "broadcast": "192.168.1.255",
+      "remote": "desk"
+    }
+  ],
+  "services": [
+    {
+      "unit": "homelab-admin.service",
+      "user": true,
+      "label": "Control center (Pi)"
+    },
+    {
+      "unit": "tailscaled.service",
+      "user": false,
+      "label": "Tailscale"
+    },
+    {
+      "unit": "docker.service",
+      "user": false,
+      "label": "Docker"
+    }
+  ],
+  "homelab_devices": [
+    "pi",
+    "workstation",
+    "switch",
+    "phone"
+  ],
+  "commands": [
+    {
+      "id": "tailscale",
+      "label": "Tailscale status",
+      "about": "Devices on the tailnet and how they connect",
+      "cmd": [
+        "tailscale",
+        "status"
+      ]
+    },
+    {
+      "id": "disk",
+      "label": "Disk space",
+      "about": "Free space on each drive",
+      "cmd": [
+        "df",
+        "-h",
+        "-x",
+        "tmpfs",
+        "-x",
+        "devtmpfs"
+      ]
+    },
+    {
+      "id": "docker",
+      "label": "Docker containers",
+      "about": "Every container, running or stopped",
+      "cmd": [
+        "docker",
+        "ps",
+        "-a",
+        "--format",
+        "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+      ]
+    },
+    {
+      "id": "power",
+      "label": "Power and throttling",
+      "about": "Temperature, clock speed and under-voltage flags",
+      "cmd": "vcgencmd measure_temp; vcgencmd measure_clock arm; vcgencmd get_throttled; vcgencmd pmic_read_adc EXT5V_V"
+    },
+    {
+      "id": "restart-panel",
+      "label": "Restart this panel",
+      "about": "Reloads the panel after code changes (back in ~3 s)",
+      "cmd": [
+        "systemd-run",
+        "--user",
+        "--on-active=2",
+        "systemctl",
+        "--user",
+        "restart",
+        "homelab-admin.service"
+      ],
+      "confirm": true
+    }
+  ],
+  "remotes": {
+    "desk": {
+      "url": "https://workstation.your-tailnet.ts.net:8443",
+      "name": "The workstation"
+    }
+  },
+  "remote_modules": {
+    "desk.overview": {
+      "title": "Workstation",
+      "tab": "home"
+    },
+    "desk.agents": {
+      "title": "Agents",
+      "tab": "agents"
+    },
+    "desk.machine": {
+      "title": "Workstation hardware",
+      "tab": "machine"
+    }
+  },
+  "ha": {
+    "url": "http://127.0.0.1:8123",
+    "token_file": "~/.config/homelab/ha-token",
+    "exclude": []
+  },
+  "notify": {
+    "panel": "https://pi.your-tailnet.ts.net:8443/",
+    "after_seconds": 60
+  },
+  "uptime": {
+    "fail_after": 2,
+    "checks": [
+      {
+        "name": "My website",
+        "url": "https://example.com/"
+      },
+      {
+        "name": "My API",
+        "url": "https://api.example.com/healthz",
+        "contains": "\"ok\""
+      }
+    ]
+  },
+  "life": {
+    "name": "Alex",
+    "food_context": "Mexico City: tacos, chilaquiles, pozole…",
+    "activities": {
+      "gym": {
+        "label": "Gym",
+        "emoji": "🏋️",
+        "skill": "strength",
+        "xp": 50,
+        "per_week": 3,
+        "quest_bonus": 100
+      },
+      "run": {
+        "label": "Run",
+        "emoji": "🏃",
+        "skill": "endurance",
+        "xp": 40,
+        "per_week": 2,
+        "quest_bonus": 80
+      },
+      "volleyball": {
+        "label": "Volleyball",
+        "emoji": "🏐",
+        "skill": "volleyball",
+        "xp": 60,
+        "per_week": 1,
+        "quest_bonus": 50
+      }
+    }
+  }
+}

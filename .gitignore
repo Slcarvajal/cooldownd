@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.env
+# your configs; the *.example.json files are the templates
+admin/config.json
+admin/config.pi.json
+admin/config.hub.json
+# your avatar strips (life/make_sprites.py writes them here)
+admin/life/sprites/*.png
+pi/stack/homeassistant/

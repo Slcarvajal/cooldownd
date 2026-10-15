@@ -1,0 +1,14 @@
+# Home server stack. Deployed to ~/homelab/stack on the Pi; data lives next to it (not in git).
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    network_mode: host          # discovery (mDNS, SSDP) needs the LAN directly
+    restart: unless-stopped
+    cap_add: [NET_ADMIN, NET_RAW]  # Bluetooth adapter management
+    environment:
+      TZ: ${TZ:-UTC}             # your time zone, e.g. TZ=Europe/Madrid docker compose up -d
+    volumes:
+      - ./homeassistant:/config
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro  # Bluetooth

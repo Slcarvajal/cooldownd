@@ -1,0 +1,10 @@
+#!/bin/sh
+# The Switch kiosk: full-screen control center (Chromium, else Firefox). URL: first argument, else ~/.config/control-center.url.
+URL="${1:-$(cat "$HOME/.config/control-center.url" 2>/dev/null)}"
+[ -n "$URL" ] || URL="about:blank"
+xset s off s noblank -dpms 2>/dev/null
+B=$(command -v chromium || command -v chromium-browser)
+[ -n "$B" ] && exec "$B" --kiosk --app="$URL" --noerrdialogs --disable-session-crashed-bubble --password-store=basic \
+  --overscroll-history-navigation=0 --check-for-update-interval=31536000 \
+  --autoplay-policy=no-user-gesture-required --force-renderer-accessibility
+exec firefox --kiosk "$URL"
