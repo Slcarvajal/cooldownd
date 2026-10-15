@@ -1,6 +1,6 @@
 # Security
 
-Tailroom can type into your coding agents, restart services and sleep your machines, so a hole matters.
+cooldownd can type into your coding agents, restart services and sleep your machines, so a hole matters.
 
 **Please don't open a public issue for a vulnerability.** Report it privately through GitHub: the repository's **Security** tab → **Report a vulnerability**. Say what an attacker needs (on the tailnet? a listed login? at the kiosk?) and what they get.
 

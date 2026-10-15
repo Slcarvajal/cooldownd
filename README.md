@@ -1,8 +1,8 @@
-# Tailroom
+# cooldownd
 
-**Keep your agents moving and your body healthy.** Tailroom is a control room for developers who run AI coding agents all day.
+**Keep your agents moving and your body healthy.** cooldownd is a control room for developers who run AI coding agents all day.
 
-Agents stall the moment they need you, so you stay glued to the desk to answer them, and your sleep, meals and workouts pay for it. Tailroom puts your agents on a touchscreen, your phone and a pair of Joy-Cons, so you can answer one from the kitchen or between sets. It also turns your workouts and meals (and your sleep, once you feed it in) into an RPG, so looking after yourself feels like part of the job.
+Agents stall the moment they need you, so you stay glued to the desk to answer them, and your sleep, meals and workouts pay for it. cooldownd puts your agents on a touchscreen, your phone and a pair of Joy-Cons, so you can answer one from the kitchen or between sets. It also turns your workouts and meals (and your sleep, once you feed it in) into an RPG, so looking after yourself feels like part of the job.
 
 It's one Python panel, standard library only. It runs on a Raspberry Pi, your workstation and a jailbroken Nintendo Switch, all on your tailnet. There's no cloud, no app store and no build step. The phone app is the panel added to your Home Screen, and its alerts are Web Push sent by the panel itself.
 
@@ -66,7 +66,7 @@ Every panel listens on `127.0.0.1` and is published with `tailscale serve`, whic
 On each machine, with Python 3.10 or newer and Tailscale:
 
 ```bash
-git clone https://github.com/Slcarvajal/tailroom ~/homelab
+git clone https://github.com/Slcarvajal/cooldownd ~/homelab
 cd ~/homelab/admin
 cp config.example.json config.json        # config.pi.example.json on the Pi, config.hub.example.json on a kiosk
 $EDITOR config.json                        # allowed_users: your Tailscale login; machines, services, commands
@@ -79,7 +79,7 @@ Then open `https://<machine>.<your-tailnet>.ts.net:8443`. To keep it running, ad
 ```ini
 # ~/.config/systemd/user/homelab-admin.service
 [Unit]
-Description=Tailroom panel
+Description=cooldownd panel
 [Service]
 WorkingDirectory=%h/homelab/admin
 Environment=ADMIN_CONFIG=%h/homelab/admin/config.json
@@ -171,7 +171,7 @@ Found a hole? See [SECURITY.md](SECURITY.md).
 
 ## Contributing: adapters wanted
 
-Tailroom grew around one person's machines. Its best future is other people's: other agent IDEs, other consoles and handhelds, other sports and data sources. **See [CONTRIBUTING.md](CONTRIBUTING.md)**. The most wanted:
+cooldownd grew around one person's machines. Its best future is other people's: other agent IDEs, other consoles and handhelds, other sports and data sources. **See [CONTRIBUTING.md](CONTRIBUTING.md)**. The most wanted:
 
 - **Agent adapters:** [T3 Code](https://github.com/pingdotgg/t3code), Cursor, Zed, Windsurf, VS Code terminals, plain tmux. Today the pager speaks to [Orca](https://github.com/stablyai/orca)'s CLI.
 - **Device ports:** PS Vita, PSP, Switch Lite / OLED / Switch 2, Steam Deck, Wii U GamePad, old Android tablets, Kindles. Anything with a browser and a screen can be a room's touchscreen.
